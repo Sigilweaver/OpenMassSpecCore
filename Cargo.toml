@@ -25,5 +25,6 @@ arrow = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-buffer"]
 arrow-array = { version = "58", optional = true }
 arrow-schema = { version = "58", optional = true }
 arrow-buffer = { version = "58", optional = true }
+thiserror = "2"
 
 [dev-dependencies]

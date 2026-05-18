@@ -17,6 +17,7 @@
 //! shared vocabulary that keeps the three parsers in lock-step.
 
 mod enums;
+mod error;
 mod mzml;
 mod source;
 mod types;
@@ -26,6 +27,7 @@ pub mod arrow;
 pub mod conformance;
 
 pub use enums::{Activation, Analyzer, MobilityArrayKind, MsPower, Polarity, ScanMode};
+pub use error::{Error, Result};
 pub use mzml::{write_indexed_mzml, write_mzml};
 pub use source::SpectrumSource;
 pub use types::{ChromatogramRecord, CvTerm, PrecursorInfo, RunMetadata, SpectrumRecord};
