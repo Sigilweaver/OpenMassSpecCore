@@ -1,0 +1,20 @@
+[package]
+name = "mass-spec-core"
+description = "Shared types, traits, and mzML writer for open Rust mass-spec parsers."
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["Nathan Riley <git@nathanriley.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/Sigilweaver/mass-spec-core"
+homepage = "https://github.com/Sigilweaver/mass-spec-core"
+keywords = ["mass-spectrometry", "mzml", "proteomics", "metabolomics", "psi-ms"]
+categories = ["science", "encoding"]
+readme = "README.md"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+
+[dev-dependencies]
