@@ -305,9 +305,12 @@ fn write_prologue<W: Write>(
             out,
             r#"      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance""#
         )?;
+        // Non-indexed documents have a plain <mzML> root, so they reference
+        // the base schema (matching version="1.1.0"), not the indexed
+        // wrapper schema used for <indexedmzML> output.
         writeln!(
             out,
-            r#"      xsi:schemaLocation="http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.2_idx.xsd""#
+            r#"      xsi:schemaLocation="http://psi.hupo.org/ms/mzml http://psidev.info/files/ms/mzML/xsd/mzML1.1.0.xsd""#
         )?;
         writeln!(out, r#"      version="1.1.0">"#)?;
     }
