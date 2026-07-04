@@ -1,7 +1,8 @@
 # CI for OpenProteoCore.
 #
 # Standalone crate, no path-dependent siblings. Runs fmt + clippy + test
-# on Linux and macOS, and a 1.85 MSRV check.
+# on Linux and macOS, a 1.85 MSRV check, and mzML schema validation of
+# the canonical writer's output against the vendored PSI-MS XSD.
 
 name: CI
 
@@ -43,3 +44,24 @@ jobs:
           toolchain: 1.85
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-features
+
+  validate-mzml:
+    name: mzML XSD validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Emit synthetic mzML from the canonical writer
+        run: |
+          cargo run --release --example emit_sample_mzml -- \
+            sample_plain.mzML sample_indexed.mzML
+      - name: Ensure xmllint is available
+        run: command -v xmllint || (sudo apt-get update -qq && sudo apt-get install -y -qq libxml2-utils)
+      - name: Validate against PSI-MS XSD
+        run: |
+          # Plain document (root <mzML>) validates against the base schema;
+          # the indexed document (root <indexedmzML>) validates against the
+          # index wrapper, which includes the base schema.
+          xmllint --noout --schema schema/mzML1.1.0.xsd sample_plain.mzML
+          xmllint --noout --schema schema/mzML1.1.2_idx.xsd sample_indexed.mzML
