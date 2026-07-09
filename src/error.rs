@@ -2,7 +2,7 @@
 //!
 //! Each vendor crate defines its own narrow `Error` enum. When code needs to
 //! handle errors from multiple vendors uniformly - the umbrella `openproteo-io`
-//! crate, the `vendor2mzml` CLI, ProLance ingest - it converts those into
+//! crate, the `vendor2mzml` CLI, SpecLance ingest - it converts those into
 //! [`Error`] (this aggregate). Downstream users get a single error vocabulary
 //! and `?`-propagates cleanly across vendor boundaries.
 
