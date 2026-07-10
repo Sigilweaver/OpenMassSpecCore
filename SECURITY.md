@@ -13,7 +13,7 @@ Only the latest published release receives security updates.
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Report privately via [GitHub Security Advisories](https://github.com/Sigilweaver/OpenProteoCore/security/advisories/new).
+Report privately via [GitHub Security Advisories](https://github.com/Sigilweaver/OpenMassSpecCore/security/advisories/new).
 
 Include:
 
@@ -27,7 +27,7 @@ Expect an initial acknowledgment within 7 days.
 
 In scope:
 
-- **mzML writer correctness on adversarial input.** `openproteo-core`
+- **mzML writer correctness on adversarial input.** `openmassspec-core`
   ships the canonical mzML 1.1.0 writer that every vendor parser
   funnels through. Crashes (panics, OOB writes), arbitrary file
   writes, or XML-injection issues triggered by crafted
@@ -55,8 +55,8 @@ a fix within 30 days of confirming a high or critical issue.
 
 ## Stack context
 
-`openproteo-core` is the foundation crate of the
-[OpenProteo](https://github.com/Sigilweaver/OpenProteo) stack. Reports
+`openmassspec-core` is the foundation crate of the
+[OpenMassSpec](https://github.com/Sigilweaver/OpenMassSpec) stack. Reports
 that involve vendor-specific parsing are usually better routed to the
 relevant parser repo:
 

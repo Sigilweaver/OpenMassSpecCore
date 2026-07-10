@@ -11,7 +11,7 @@
 use std::fs::File;
 use std::io::BufWriter;
 
-use openproteo_core::{
+use openmassspec_core::{
     write_indexed_mzml, write_mzml, Activation, Analyzer, CvTerm, MobilityArrayKind, MsPower,
     Polarity, PrecursorInfo, RunMetadata, ScanMode, SpectrumRecord, SpectrumSource,
 };
@@ -29,7 +29,7 @@ impl SampleSource {
             source_file_format: CvTerm::new("MS:1000563", "Thermo RAW format"),
             native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
             instrument: CvTerm::new("MS:1001911", "Q Exactive"),
-            software_name: "openproteo-core-sample".into(),
+            software_name: "openmassspec-core-sample".into(),
             software_version: env!("CARGO_PKG_VERSION").into(),
             start_timestamp: None,
             mobility_array_kind: Some(MobilityArrayKind::InverseReducedVsPerCm2),

@@ -15,7 +15,7 @@
 //! Polars / DataFusion / DuckDB consumers.
 //!
 //! The Arrow schema is part of this crate's stable surface for the
-//! purposes of consumers that pin `openproteo-core` directly; any column
+//! purposes of consumers that pin `openmassspec-core` directly; any column
 //! addition is a minor-version bump, any removal or rename is breaking.
 
 use std::sync::Arc;

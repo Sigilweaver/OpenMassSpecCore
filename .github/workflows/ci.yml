@@ -1,4 +1,4 @@
-# CI for OpenProteoCore.
+# CI for OpenMassSpecCore.
 #
 # Standalone crate, no path-dependent siblings. Runs fmt + clippy + test
 # on Linux and macOS, a 1.85 MSRV check, and mzML schema validation of

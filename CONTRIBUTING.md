@@ -1,10 +1,10 @@
-# Contributing to OpenProteoCore
+# Contributing to OpenMassSpecCore
 
-Thanks for your interest in OpenProteoCore. This is a small, single-maintainer
+Thanks for your interest in OpenMassSpecCore. This is a small, single-maintainer
 project that ships [Apache-2.0](LICENSE) Rust (and Python where
 applicable) tooling for the open mass-spec stack.
 
-Crates / packages in this repo: openproteo-core.
+Crates / packages in this repo: openmassspec-core.
 
 ## Before you open a PR
 

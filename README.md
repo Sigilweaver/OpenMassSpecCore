@@ -1,18 +1,18 @@
-# openproteo-core
+# openmassspec-core
 
-[![CI](https://github.com/Sigilweaver/OpenProteoCore/actions/workflows/ci.yml/badge.svg)](https://github.com/Sigilweaver/OpenProteoCore/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/openproteo-core.svg)](https://crates.io/crates/openproteo-core)
-[![docs.rs](https://img.shields.io/docsrs/openproteo-core)](https://docs.rs/openproteo-core)
+[![CI](https://github.com/Sigilweaver/OpenMassSpecCore/actions/workflows/ci.yml/badge.svg)](https://github.com/Sigilweaver/OpenMassSpecCore/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/openmassspec-core.svg)](https://crates.io/crates/openmassspec-core)
+[![docs.rs](https://img.shields.io/docsrs/openmassspec-core)](https://docs.rs/openmassspec-core)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust MSRV](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
-> Part of the [OpenProteo](https://sigilweaver.app/openproteo/docs/)
-> stack for proteomics raw-file access. Sibling readers:
+> Part of the [OpenMassSpec](https://sigilweaver.app/openmassspec/docs/)
+> stack for mass spectrometry raw-file access. Sibling readers:
 > [OpenTFRaw](https://github.com/Sigilweaver/OpenTFRaw) (Thermo),
 > [OpenTimsTDF](https://github.com/Sigilweaver/OpenTimsTDF) (Bruker),
 > [OpenWRaw](https://github.com/Sigilweaver/OpenWRaw) (Waters).
 
-Shared, vendor-neutral foundation for the OpenProteo mass-spec stack:
+Shared, vendor-neutral foundation for the OpenMassSpec stack:
 the `SpectrumSource` trait every parser implements, the canonical
 `SpectrumRecord` / `RunMetadata` types, a streaming mzML 1.1.0 writer
 (with optional indexed mzML output and SHA-1 footer), an optional
@@ -23,18 +23,18 @@ harness.
 - License: Apache-2.0
 - `#![forbid(unsafe_code)]`
 
-Documentation: [sigilweaver.app/openproteo/docs](https://sigilweaver.app/openproteo/docs)
+Documentation: [sigilweaver.app/openmassspec/docs](https://sigilweaver.app/openmassspec/docs)
 
 ## Install
 
 ```sh
-cargo add openproteo-core
+cargo add openmassspec-core
 ```
 
 With the optional Arrow bridge:
 
 ```sh
-cargo add openproteo-core --features arrow
+cargo add openmassspec-core --features arrow
 ```
 
 ## Quick example
@@ -42,7 +42,7 @@ cargo add openproteo-core --features arrow
 Implement `SpectrumSource` and write a valid indexed mzML document:
 
 ```rust
-use openproteo_core::{
+use openmassspec_core::{
     write_indexed_mzml, RunMetadata, SpectrumRecord, SpectrumSource,
 };
 
@@ -105,7 +105,7 @@ Failures surface as `ConformanceError` variants
 `RetentionTimeNonMonotonic`, and others).
 
 The `vendor2mzml validate` subcommand in the
-[OpenProteo](https://github.com/Sigilweaver/OpenProteo) umbrella runs
+[OpenMassSpec](https://github.com/Sigilweaver/OpenMassSpec) umbrella runs
 this harness on any vendor input or pre-existing mzML.
 
 ## Feature flags

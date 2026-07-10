@@ -1,7 +1,7 @@
-# Publish openproteo-core to crates.io on tag push.
+# Publish openmassspec-core to crates.io on tag push.
 #
 # Requires repository secret CARGO_REGISTRY_TOKEN with publish access
-# to the `openproteo-core` crate on crates.io.
+# to the `openmassspec-core` crate on crates.io.
 
 name: Publish
 
@@ -23,6 +23,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish -p openproteo-core
+      - run: cargo publish -p openmassspec-core
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

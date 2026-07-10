@@ -1,12 +1,25 @@
 # Changelog
 
-All notable changes to `openproteo-core` are documented here. The format
+All notable changes to `openmassspec-core` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 crate adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.0] - 2026-07-10
 
-- _No unreleased changes yet._
+Renamed from `openproteo-core`. The vendor raw-file readers this crate
+underpins (Thermo, Bruker, Waters, with Agilent and SCIEX joining the
+suite) are used as much in metabolomics and lipidomics as in proteomics,
+so the umbrella naming moved from proteomics-specific to general mass
+spectrometry. No API or behavioral changes from `openproteo-core` 1.0.1;
+version reset to 1.0.0 to reflect that this is a new package identity on
+crates.io (the old `openproteo-core` name stays published and frozen at
+1.0.1, it is not superseded in place). See
+[openproteo-core's CHANGELOG](https://github.com/Sigilweaver/OpenProteoCore/blob/main/CHANGELOG.md)
+for pre-rename history.
+
+### Changed
+
+- Package renamed `openproteo-core` -> `openmassspec-core`.
 
 ## [1.0.1] - 2026-05-22
 
@@ -71,5 +84,5 @@ vendor-neutral foundation the vendor parsers
 - `#![forbid(unsafe_code)]` crate-wide.
 - License: Apache-2.0.
 
-[Unreleased]: https://github.com/Sigilweaver/OpenProteoCore/compare/v0.1.0...HEAD
+[1.0.0]: https://github.com/Sigilweaver/OpenMassSpecCore/releases/tag/v1.0.0
 [0.1.0]: https://github.com/Sigilweaver/OpenProteoCore/releases/tag/v0.1.0

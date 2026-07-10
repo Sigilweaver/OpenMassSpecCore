@@ -1,7 +1,7 @@
-//! Aggregate error type for the OpenProteo stack.
+//! Aggregate error type for the OpenMassSpec stack.
 //!
 //! Each vendor crate defines its own narrow `Error` enum. When code needs to
-//! handle errors from multiple vendors uniformly - the umbrella `openproteo-io`
+//! handle errors from multiple vendors uniformly - the umbrella `openmassspec-io`
 //! crate, the `vendor2mzml` CLI, SpecLance ingest - it converts those into
 //! [`Error`] (this aggregate). Downstream users get a single error vocabulary
 //! and `?`-propagates cleanly across vendor boundaries.

@@ -1,4 +1,4 @@
-//! `openproteo-core` is the shared foundation for the open Rust mass-spec
+//! `openmassspec-core` is the shared foundation for the open Rust mass-spec
 //! parsers (`opentfraw`, `opentimstdf`, `openwraw`).
 //!
 //! It exposes:
@@ -15,7 +15,7 @@
 //!   any `SpectrumSource`.
 //!
 //! Each vendor crate is a standalone tool (a user can pull in `opentfraw`
-//! alone and get parsing **and** mzML export); `openproteo-core` is the
+//! alone and get parsing **and** mzML export); `openmassspec-core` is the
 //! shared vocabulary that keeps the three parsers in lock-step.
 
 mod centroid;

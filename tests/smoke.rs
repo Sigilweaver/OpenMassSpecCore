@@ -1,7 +1,7 @@
 //! End-to-end smoke test: build a minimal `SpectrumSource`, write mzML,
 //! check the output is well-formed XML and contains the expected spectra.
 
-use openproteo_core::{
+use openmassspec_core::{
     write_indexed_mzml, write_mzml, Activation, Analyzer, CvTerm, MsPower, Polarity, PrecursorInfo,
     RunMetadata, ScanMode, SpectrumRecord, SpectrumSource,
 };
