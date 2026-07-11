@@ -85,4 +85,4 @@ vendor-neutral foundation the vendor parsers
 - License: Apache-2.0.
 
 [1.0.0]: https://github.com/Sigilweaver/OpenMassSpecCore/releases/tag/v1.0.0-openmassspec
-[0.1.0]: https://github.com/Sigilweaver/OpenProteoCore/releases/tag/v0.1.0
+[0.1.0]: https://github.com/Sigilweaver/OpenMassSpecCore/releases/tag/v0.1.0
