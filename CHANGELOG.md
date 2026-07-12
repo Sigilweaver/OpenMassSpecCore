@@ -6,6 +6,15 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-07-12
+
+### Changed
+
+- Bumped `arrow-array`/`arrow-schema`/`arrow-buffer` from `^58` to `^59`
+  (optional `arrow` feature). No public API change; this unblocks
+  downstream crates that need `arrow`'s `pyarrow` feature to build
+  against pyo3 0.29 (only one pyo3 version can be linked per binary).
+
 ## [1.1.0] - 2026-07-12
 
 ### Added
