@@ -4,6 +4,23 @@ All notable changes to `openmassspec-core` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 crate adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [1.1.0] - 2026-07-12
+
+### Added
+
+- `Centroided<S>`, a `SpectrumSource` adapter that centroids every
+  profile-mode spectrum a wrapped source yields (local-maxima peak
+  picking; the picked m/z, and inverse mobility when present, is the
+  intensity-weighted centroid over each apex and its immediate
+  neighbors). Spectra already tagged `ScanMode::Centroid` pass through
+  unchanged, so wrapping a source is idempotent. An optional
+  `with_min_intensity` builder method discards picked peaks below a
+  noise floor. Composes with `write_mzml`/`write_indexed_mzml` and the
+  Arrow bridge with no special-casing, since it is just another
+  `SpectrumSource`.
+
 ## [1.0.0] - 2026-07-10
 
 Renamed from `openproteo-core`. The vendor raw-file readers this crate
