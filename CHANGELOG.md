@@ -6,6 +6,8 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-15
+
 ### Added
 
 - `SpectrumRecord::faims_cv`, an `Option<f64>` carrying FAIMS compensation
