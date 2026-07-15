@@ -41,6 +41,7 @@ impl ToySource {
             high_mz: None,
             ion_injection_time_ms: Some(20.0),
             inv_mobility: None,
+            faims_cv: None,
             precursor: None,
             mz: vec![100.0, 200.0, 300.0],
             intensity: vec![1.0, 5.0, 2.0],
@@ -63,6 +64,7 @@ impl ToySource {
             high_mz: Some(180.0),
             ion_injection_time_ms: Some(50.0),
             inv_mobility: None,
+            faims_cv: Some(-45.0),
             precursor: Some(PrecursorInfo {
                 target_mz: Some(200.0),
                 selected_mz: Some(200.001),
@@ -125,6 +127,10 @@ fn writes_plain_mzml() {
     assert!(s.contains(r#"<cvParam cvRef="MS" accession="MS:1001911" name="Q Exactive""#));
     // CID on FTMS analyzer should map to beam-type CID, not ion-trap CID.
     assert!(s.contains(r#"accession="MS:1000422" name="beam-type collision-induced dissociation""#));
+    // s2 carries a FAIMS CV; s1 does not.
+    assert!(
+        s.contains(r#"accession="MS:1001581" name="FAIMS compensation voltage" value="-45.0000""#)
+    );
     assert!(s.ends_with("</mzML>\n"));
 }
 

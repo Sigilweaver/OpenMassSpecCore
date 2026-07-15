@@ -102,6 +102,10 @@ pub struct SpectrumRecord {
     /// Mean inverse reduced ion mobility (1/K0) for the spectrum, when
     /// applicable (Bruker timsTOF, Waters TWIMS).
     pub inv_mobility: Option<f64>,
+    /// FAIMS compensation voltage in volts, when the instrument has a FAIMS
+    /// Pro interface and reports it per-scan (Thermo Orbitrap Fusion/Lumos/
+    /// Eclipse/Ascend). `None` when not applicable or not decoded.
+    pub faims_cv: Option<f64>,
     pub precursor: Option<PrecursorInfo>,
     pub mz: Vec<f64>,
     pub intensity: Vec<f32>,

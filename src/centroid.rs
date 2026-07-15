@@ -223,6 +223,7 @@ mod tests {
             high_mz: Some(201.0),
             ion_injection_time_ms: None,
             inv_mobility: None,
+            faims_cv: None,
             precursor: None,
             mz,
             intensity,
