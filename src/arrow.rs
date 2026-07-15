@@ -363,6 +363,7 @@ mod tests {
             high_mz: mz.last().copied(),
             ion_injection_time_ms: None,
             inv_mobility: None,
+            faims_cv: None,
             precursor: if ms_level >= 2 {
                 Some(PrecursorInfo {
                     target_mz: Some(500.0),

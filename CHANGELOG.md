@@ -6,6 +6,27 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `SpectrumRecord::faims_cv`, an `Option<f64>` carrying FAIMS compensation
+  voltage in volts. The writer emits it as a scan-level `MS:1001581`
+  ("FAIMS compensation voltage") cvParam when present. Adding this field
+  is a source-breaking change for any code that constructs a
+  `SpectrumRecord` literal without `..Default::default()` (there is no
+  `Default` impl) - existing vendor crates need one line added at their
+  `SpectrumRecord` construction site(s) (closes #3).
+
+### Fixed
+
+- `write_mzml`/`write_indexed_mzml` now call `SpectrumSource::iter_chromatograms`
+  and emit a `<chromatogramList>` (with a second `<index name="chromatogram">`
+  block in the indexed variant) when the source yields anything; previously
+  chromatogram data had no path to output regardless of vendor (closes #1).
+- `write_prologue` now emits the `<run startTimeStamp="...">` attribute
+  from `RunMetadata.start_timestamp` when present. All five vendor crates
+  already populate this field; the writer was silently dropping it
+  (closes #2).
+
 ## [1.1.1] - 2026-07-12
 
 ### Changed

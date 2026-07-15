@@ -12,13 +12,15 @@ use std::fs::File;
 use std::io::BufWriter;
 
 use openmassspec_core::{
-    write_indexed_mzml, write_mzml, Activation, Analyzer, CvTerm, MobilityArrayKind, MsPower,
-    Polarity, PrecursorInfo, RunMetadata, ScanMode, SpectrumRecord, SpectrumSource,
+    write_indexed_mzml, write_mzml, Activation, Analyzer, ChromatogramRecord, CvTerm,
+    MobilityArrayKind, MsPower, Polarity, PrecursorInfo, RunMetadata, ScanMode, SpectrumRecord,
+    SpectrumSource,
 };
 
 struct SampleSource {
     meta: RunMetadata,
     spectra: Vec<SpectrumRecord>,
+    chroms: Vec<ChromatogramRecord>,
     cursor: usize,
 }
 
@@ -31,7 +33,9 @@ impl SampleSource {
             instrument: CvTerm::new("MS:1001911", "Q Exactive"),
             software_name: "openmassspec-core-sample".into(),
             software_version: env!("CARGO_PKG_VERSION").into(),
-            start_timestamp: None,
+            // Exercises the `startTimeStamp` attribute path so it is
+            // schema-checked without a vendor file.
+            start_timestamp: Some("2026-06-01T14:30:00Z".into()),
             mobility_array_kind: Some(MobilityArrayKind::InverseReducedVsPerCm2),
         };
         let ms1 = SpectrumRecord {
@@ -51,6 +55,7 @@ impl SampleSource {
             high_mz: None,
             ion_injection_time_ms: Some(20.0),
             inv_mobility: None,
+            faims_cv: None,
             precursor: None,
             mz: vec![100.0, 200.0, 300.0],
             intensity: vec![1.0, 5.0, 2.0],
@@ -73,6 +78,7 @@ impl SampleSource {
             high_mz: Some(180.0),
             ion_injection_time_ms: Some(50.0),
             inv_mobility: None,
+            faims_cv: Some(-45.0),
             precursor: Some(PrecursorInfo {
                 target_mz: Some(200.0),
                 selected_mz: Some(200.001),
@@ -110,14 +116,40 @@ impl SampleSource {
             high_mz: None,
             ion_injection_time_ms: None,
             inv_mobility: Some(0.95),
+            faims_cv: None,
             precursor: None,
             mz: vec![120.0, 240.0, 360.0],
             intensity: vec![3.0, 7.0, 4.0],
             inv_mobility_per_peak: Some(vec![0.92, 0.95, 0.98]),
         };
+        // A TIC and a SRM/MRM transition chromatogram. Exercises the
+        // `chromatogramList` path (plain + indexed) so it is schema-checked
+        // without a vendor file.
+        let tic = ChromatogramRecord {
+            index: 0,
+            id: "TIC".into(),
+            chromatogram_type: Some(CvTerm::new("MS:1000235", "total ion current chromatogram")),
+            precursor_mz: None,
+            product_mz: None,
+            time_sec: vec![0.0, 30.0, 45.0],
+            intensity: vec![120.0, 340.0, 210.0],
+        };
+        let srm = ChromatogramRecord {
+            index: 1,
+            id: "SRM SIC Q1=524.3 Q3=136.1".into(),
+            chromatogram_type: Some(CvTerm::new(
+                "MS:1001473",
+                "selected reaction monitoring chromatogram",
+            )),
+            precursor_mz: Some(524.3),
+            product_mz: Some(136.1),
+            time_sec: vec![0.0, 30.0],
+            intensity: vec![50.0, 80.0],
+        };
         Self {
             meta,
             spectra: vec![ms1, ms2, ms1_mobility],
+            chroms: vec![tic, srm],
             cursor: 0,
         }
     }
@@ -137,6 +169,10 @@ impl SpectrumSource for SampleSource {
             }
             rec
         }))
+    }
+
+    fn iter_chromatograms<'a>(&'a mut self) -> Box<dyn Iterator<Item = ChromatogramRecord> + 'a> {
+        Box::new(self.chroms.clone().into_iter())
     }
 
     fn spectrum_count_hint(&self) -> Option<usize> {

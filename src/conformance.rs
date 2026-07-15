@@ -347,6 +347,7 @@ mod tests {
             high_mz: Some(200.0),
             ion_injection_time_ms: None,
             inv_mobility: None,
+            faims_cv: None,
             precursor: if ms_level >= 2 {
                 Some(PrecursorInfo {
                     selected_mz: Some(500.0),

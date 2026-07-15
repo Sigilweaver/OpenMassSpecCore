@@ -15,7 +15,7 @@ use std::io::{Result, Write};
 
 use crate::enums::{Activation, Analyzer, MobilityArrayKind, Polarity, ScanMode};
 use crate::source::SpectrumSource;
-use crate::types::{CvTerm, RunMetadata, SpectrumRecord};
+use crate::types::{ChromatogramRecord, CvTerm, RunMetadata, SpectrumRecord};
 
 // ---------- byte-counting writer that also feeds a streaming SHA-1 ----------
 
@@ -220,6 +220,20 @@ pub fn write_mzml<S: SpectrumSource + ?Sized, W: Write>(src: &mut S, out: &mut W
         write_spectrum(out, &rec, mobility_kind)?;
     }
     writeln!(out, r#"    </spectrumList>"#)?;
+
+    let chroms: Vec<ChromatogramRecord> = src.iter_chromatograms().collect();
+    if !chroms.is_empty() {
+        writeln!(
+            out,
+            r#"    <chromatogramList count="{}" defaultDataProcessingRef="dp1">"#,
+            chroms.len()
+        )?;
+        for rec in &chroms {
+            write_chromatogram(out, rec)?;
+        }
+        writeln!(out, r#"    </chromatogramList>"#)?;
+    }
+
     writeln!(out, r#"  </run>"#)?;
     writeln!(out, r#"</mzML>"#)?;
     Ok(())
@@ -245,11 +259,28 @@ pub fn write_indexed_mzml<S: SpectrumSource + ?Sized, W: Write>(
     }
 
     writeln!(cw, r#"    </spectrumList>"#)?;
+
+    let chroms: Vec<ChromatogramRecord> = src.iter_chromatograms().collect();
+    let mut chrom_offsets: Vec<(String, u64)> = Vec::with_capacity(chroms.len());
+    if !chroms.is_empty() {
+        writeln!(
+            cw,
+            r#"    <chromatogramList count="{}" defaultDataProcessingRef="dp1">"#,
+            chroms.len()
+        )?;
+        for rec in &chroms {
+            chrom_offsets.push((rec.id.clone(), cw.pos));
+            write_chromatogram(&mut cw, rec)?;
+        }
+        writeln!(cw, r#"    </chromatogramList>"#)?;
+    }
+
     writeln!(cw, r#"  </run>"#)?;
     writeln!(cw, r#"  </mzML>"#)?;
 
     let index_list_offset = cw.pos;
-    writeln!(cw, r#"  <indexList count="1">"#)?;
+    let n_indexes = 1 + usize::from(!chrom_offsets.is_empty());
+    writeln!(cw, r#"  <indexList count="{n_indexes}">"#)?;
     writeln!(cw, r#"    <index name="spectrum">"#)?;
     for (id, offset) in &offsets {
         writeln!(
@@ -260,6 +291,18 @@ pub fn write_indexed_mzml<S: SpectrumSource + ?Sized, W: Write>(
         )?;
     }
     writeln!(cw, r#"    </index>"#)?;
+    if !chrom_offsets.is_empty() {
+        writeln!(cw, r#"    <index name="chromatogram">"#)?;
+        for (id, offset) in &chrom_offsets {
+            writeln!(
+                cw,
+                r#"      <offset idRef="{}">{}</offset>"#,
+                escape(id),
+                offset
+            )?;
+        }
+        writeln!(cw, r#"    </index>"#)?;
+    }
     writeln!(cw, r#"  </indexList>"#)?;
 
     cw.hashing = false;
@@ -385,11 +428,19 @@ fn write_prologue<W: Write>(
     writeln!(out, r#"    </dataProcessing>"#)?;
     writeln!(out, r#"  </dataProcessingList>"#)?;
 
-    writeln!(
-        out,
-        r#"  <run id="{}" defaultInstrumentConfigurationRef="IC1" defaultSourceFileRef="sf1">"#,
-        escape(&meta.source_file_name)
-    )?;
+    match &meta.start_timestamp {
+        Some(ts) => writeln!(
+            out,
+            r#"  <run id="{}" defaultInstrumentConfigurationRef="IC1" defaultSourceFileRef="sf1" startTimeStamp="{}">"#,
+            escape(&meta.source_file_name),
+            escape(ts)
+        )?,
+        None => writeln!(
+            out,
+            r#"  <run id="{}" defaultInstrumentConfigurationRef="IC1" defaultSourceFileRef="sf1">"#,
+            escape(&meta.source_file_name)
+        )?,
+    }
     writeln!(
         out,
         r#"    <spectrumList count="{}" defaultDataProcessingRef="dp1">"#,
@@ -528,6 +579,14 @@ fn write_spectrum<W: Write>(
             out,
             r#"            <cvParam cvRef="MS" accession="MS:1002815" name="inverse reduced ion mobility" value="{:.6}" unitCvRef="MS" unitAccession="MS:1002814" unitName="volt-second per square centimeter"/>"#,
             mob
+        )?;
+    }
+
+    if let Some(cv) = rec.faims_cv {
+        writeln!(
+            out,
+            r#"            <cvParam cvRef="MS" accession="MS:1001581" name="FAIMS compensation voltage" value="{:.4}" unitCvRef="UO" unitAccession="UO:0000218" unitName="volt"/>"#,
+            cv
         )?;
     }
 
@@ -743,9 +802,113 @@ fn write_spectrum<W: Write>(
     Ok(())
 }
 
+fn write_chromatogram<W: Write>(out: &mut W, rec: &ChromatogramRecord) -> Result<()> {
+    let n = rec.time_sec.len();
+
+    writeln!(
+        out,
+        r#"      <chromatogram id="{id}" index="{idx}" defaultArrayLength="{n}">"#,
+        id = escape(&rec.id),
+        idx = rec.index,
+    )?;
+
+    match &rec.chromatogram_type {
+        Some(cv) => write_cv(out, "        ", cv)?,
+        None => writeln!(
+            out,
+            r#"        <cvParam cvRef="MS" accession="MS:1000235" name="total ion current chromatogram" value=""/>"#
+        )?,
+    }
+
+    if let Some(mz) = rec.precursor_mz {
+        writeln!(out, r#"        <precursor>"#)?;
+        writeln!(out, r#"          <isolationWindow>"#)?;
+        writeln!(
+            out,
+            r#"            <cvParam cvRef="MS" accession="MS:1000827" name="isolation window target m/z" value="{:.6}" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>"#,
+            mz
+        )?;
+        writeln!(out, r#"          </isolationWindow>"#)?;
+        writeln!(out, r#"          <activation>"#)?;
+        writeln!(
+            out,
+            r#"            <cvParam cvRef="MS" accession="MS:1000133" name="collision-induced dissociation" value=""/>"#
+        )?;
+        writeln!(out, r#"          </activation>"#)?;
+        writeln!(out, r#"        </precursor>"#)?;
+    }
+
+    if let Some(mz) = rec.product_mz {
+        writeln!(out, r#"        <product>"#)?;
+        writeln!(out, r#"          <isolationWindow>"#)?;
+        writeln!(
+            out,
+            r#"            <cvParam cvRef="MS" accession="MS:1000827" name="isolation window target m/z" value="{:.6}" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>"#,
+            mz
+        )?;
+        writeln!(out, r#"          </isolationWindow>"#)?;
+        writeln!(out, r#"        </product>"#)?;
+    }
+
+    // binaryDataArrayList is required (not optional) on ChromatogramType,
+    // unlike SpectrumType where it's dropped for zero-peak spectra.
+    // mzML stores time arrays in minutes by convention, matching scan start
+    // time; `time_sec` is stored in seconds per `ChromatogramRecord`'s docs.
+    let time_min: Vec<f32> = rec.time_sec.iter().map(|&t| t / 60.0).collect();
+    let time_b64 = encode_f32_array(&time_min);
+    let int_b64 = encode_f32_array(&rec.intensity);
+
+    writeln!(out, r#"        <binaryDataArrayList count="2">"#)?;
+
+    writeln!(
+        out,
+        r#"          <binaryDataArray encodedLength="{}">"#,
+        time_b64.len()
+    )?;
+    writeln!(
+        out,
+        r#"            <cvParam cvRef="MS" accession="MS:1000595" name="time array" value="" unitCvRef="UO" unitAccession="UO:0000031" unitName="minute"/>"#
+    )?;
+    writeln!(
+        out,
+        r#"            <cvParam cvRef="MS" accession="MS:1000521" name="32-bit float" value=""/>"#
+    )?;
+    writeln!(
+        out,
+        r#"            <cvParam cvRef="MS" accession="MS:1000576" name="no compression" value=""/>"#
+    )?;
+    writeln!(out, r#"            <binary>{time_b64}</binary>"#)?;
+    writeln!(out, r#"          </binaryDataArray>"#)?;
+
+    writeln!(
+        out,
+        r#"          <binaryDataArray encodedLength="{}">"#,
+        int_b64.len()
+    )?;
+    writeln!(
+        out,
+        r#"            <cvParam cvRef="MS" accession="MS:1000515" name="intensity array" value=""/>"#
+    )?;
+    writeln!(
+        out,
+        r#"            <cvParam cvRef="MS" accession="MS:1000521" name="32-bit float" value=""/>"#
+    )?;
+    writeln!(
+        out,
+        r#"            <cvParam cvRef="MS" accession="MS:1000576" name="no compression" value=""/>"#
+    )?;
+    writeln!(out, r#"            <binary>{int_b64}</binary>"#)?;
+    writeln!(out, r#"          </binaryDataArray>"#)?;
+
+    writeln!(out, r#"        </binaryDataArrayList>"#)?;
+    writeln!(out, r#"      </chromatogram>"#)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::enums::Polarity;
 
     #[test]
     fn base64_rfc_vectors() {
@@ -755,5 +918,203 @@ mod tests {
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
         assert_eq!(base64_encode(b"Man"), "TWFu");
+    }
+
+    struct ToySource {
+        start_timestamp: Option<String>,
+        spectra: Vec<SpectrumRecord>,
+        chroms: Vec<ChromatogramRecord>,
+    }
+
+    impl ToySource {
+        fn new() -> Self {
+            Self {
+                start_timestamp: None,
+                spectra: vec![minimal_spectrum(0, None)],
+                chroms: Vec::new(),
+            }
+        }
+    }
+
+    impl SpectrumSource for ToySource {
+        fn run_metadata(&self) -> RunMetadata {
+            RunMetadata {
+                source_file_name: "toy.raw".into(),
+                source_file_format: CvTerm::new("MS:1000563", "Thermo RAW format"),
+                native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
+                instrument: CvTerm::new("MS:1001911", "Q Exactive"),
+                software_name: "toy".into(),
+                software_version: "0.0.0".into(),
+                start_timestamp: self.start_timestamp.clone(),
+                mobility_array_kind: None,
+            }
+        }
+
+        fn iter_spectra<'a>(&'a mut self) -> Box<dyn Iterator<Item = SpectrumRecord> + 'a> {
+            Box::new(self.spectra.clone().into_iter())
+        }
+
+        fn iter_chromatograms<'a>(
+            &'a mut self,
+        ) -> Box<dyn Iterator<Item = ChromatogramRecord> + 'a> {
+            Box::new(self.chroms.clone().into_iter())
+        }
+
+        fn spectrum_count_hint(&self) -> Option<usize> {
+            Some(self.spectra.len())
+        }
+    }
+
+    fn minimal_spectrum(index: usize, faims_cv: Option<f64>) -> SpectrumRecord {
+        SpectrumRecord {
+            index,
+            scan_number: (index + 1) as u32,
+            native_id: format!("controllerType=0 controllerNumber=1 scan={}", index + 1),
+            ms_level: 1,
+            polarity: Some(Polarity::Positive),
+            scan_mode: Some(ScanMode::Centroid),
+            analyzer: None,
+            filter: None,
+            retention_time_sec: index as f64,
+            total_ion_current: None,
+            base_peak_mz: None,
+            base_peak_intensity: None,
+            low_mz: None,
+            high_mz: None,
+            ion_injection_time_ms: None,
+            inv_mobility: None,
+            faims_cv,
+            precursor: None,
+            mz: vec![100.0],
+            intensity: vec![1.0],
+            inv_mobility_per_peak: None,
+        }
+    }
+
+    fn tic_chromatogram(index: usize) -> ChromatogramRecord {
+        ChromatogramRecord {
+            index,
+            id: "TIC".into(),
+            chromatogram_type: Some(CvTerm::new("MS:1000235", "total ion current chromatogram")),
+            precursor_mz: None,
+            product_mz: None,
+            time_sec: vec![0.0, 60.0, 120.0],
+            intensity: vec![10.0, 20.0, 15.0],
+        }
+    }
+
+    fn srm_chromatogram(index: usize) -> ChromatogramRecord {
+        ChromatogramRecord {
+            index,
+            id: "SRM SIC Q1=524.3 Q3=136.1".into(),
+            chromatogram_type: Some(CvTerm::new(
+                "MS:1001473",
+                "selected reaction monitoring chromatogram",
+            )),
+            precursor_mz: Some(524.3),
+            product_mz: Some(136.1),
+            time_sec: vec![0.0, 30.0],
+            intensity: vec![5.0, 8.0],
+        }
+    }
+
+    #[test]
+    fn start_timestamp_emitted_when_present() {
+        let mut src = ToySource::new();
+        src.start_timestamp = Some("2026-01-01T12:00:00Z".into());
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"startTimeStamp="2026-01-01T12:00:00Z""#));
+    }
+
+    #[test]
+    fn start_timestamp_omitted_when_absent() {
+        let mut src = ToySource::new();
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(!s.contains("startTimeStamp"));
+    }
+
+    #[test]
+    fn faims_cv_emitted_when_present() {
+        let mut src = ToySource::new();
+        src.spectra = vec![minimal_spectrum(0, Some(-45.0))];
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(
+            r#"accession="MS:1001581" name="FAIMS compensation voltage" value="-45.0000""#
+        ));
+    }
+
+    #[test]
+    fn faims_cv_omitted_when_absent() {
+        let mut src = ToySource::new();
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(!s.contains("MS:1001581"));
+    }
+
+    #[test]
+    fn chromatogram_list_omitted_when_source_yields_none() {
+        let mut src = ToySource::new();
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(!s.contains("chromatogramList"));
+        assert!(!s.contains("<chromatogram "));
+    }
+
+    #[test]
+    fn chromatogram_list_emitted_with_tic_and_srm() {
+        let mut src = ToySource::new();
+        src.chroms = vec![tic_chromatogram(0), srm_chromatogram(1)];
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<chromatogramList count="2" defaultDataProcessingRef="dp1">"#));
+        assert!(s.contains(r#"<chromatogram id="TIC" index="0" defaultArrayLength="3">"#));
+        assert!(s.contains(
+            r#"<chromatogram id="SRM SIC Q1=524.3 Q3=136.1" index="1" defaultArrayLength="2">"#
+        ));
+        assert!(s.contains(r#"accession="MS:1000235" name="total ion current chromatogram""#));
+        assert!(s.contains(
+            r#"accession="MS:1001473" name="selected reaction monitoring chromatogram""#
+        ));
+        // SRM carries precursor/product isolation windows; TIC carries neither.
+        assert!(s.contains("<precursor>"));
+        assert!(s.contains("<product>"));
+        // chromatogramList must close before </run>, after </spectrumList>.
+        let spectrum_list_end = s.find("</spectrumList>").unwrap();
+        let chrom_list_start = s.find("<chromatogramList").unwrap();
+        let run_end = s.find("</run>").unwrap();
+        assert!(spectrum_list_end < chrom_list_start);
+        assert!(chrom_list_start < run_end);
+    }
+
+    #[test]
+    fn indexed_mzml_adds_chromatogram_index_block() {
+        let mut src = ToySource::new();
+        src.chroms = vec![tic_chromatogram(0)];
+        let mut buf = Vec::new();
+        write_indexed_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<indexList count="2">"#));
+        assert!(s.contains(r#"<index name="spectrum">"#));
+        assert!(s.contains(r#"<index name="chromatogram">"#));
+        assert!(s.contains(r#"idRef="TIC""#));
+    }
+
+    #[test]
+    fn indexed_mzml_has_single_index_block_without_chromatograms() {
+        let mut src = ToySource::new();
+        let mut buf = Vec::new();
+        write_indexed_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<indexList count="1">"#));
+        assert!(!s.contains(r#"<index name="chromatogram">"#));
     }
 }
