@@ -61,6 +61,7 @@ pub fn spectrum_record_schema() -> SchemaRef {
         Field::new("precursor_native_id", DataType::Utf8, true),
         Field::new("precursor_activation", DataType::Utf8, true),
         Field::new("precursor_analyzer", DataType::Utf8, true),
+        Field::new("precursor_ccs", DataType::Float64, true),
         Field::new_large_list("mz", mz_item, false),
         Field::new_large_list("intensity", int_item, false),
         Field::new_large_list("inv_mobility_per_peak", mob_item, true),
@@ -151,6 +152,7 @@ pub struct SpectrumBatchBuilder {
     precursor_native_id: StringBuilder,
     precursor_activation: StringBuilder,
     precursor_analyzer: StringBuilder,
+    precursor_ccs: Float64Builder,
     mz: LargeListBuilder<Float64Builder>,
     intensity: LargeListBuilder<Float32Builder>,
     inv_mobility_per_peak: LargeListBuilder<Float32Builder>,
@@ -191,6 +193,7 @@ impl SpectrumBatchBuilder {
             precursor_native_id: StringBuilder::new(),
             precursor_activation: StringBuilder::new(),
             precursor_analyzer: StringBuilder::new(),
+            precursor_ccs: Float64Builder::new(),
             mz: LargeListBuilder::new(Float64Builder::new()).with_field(Arc::new(Field::new(
                 "item",
                 DataType::Float64,
@@ -248,6 +251,7 @@ impl SpectrumBatchBuilder {
                     .append_option(p.activation.map(activation_str));
                 self.precursor_analyzer
                     .append_option(p.analyzer.map(analyzer_str));
+                self.precursor_ccs.append_option(p.ccs);
             }
             None => {
                 self.precursor_target_mz.append_null();
@@ -260,6 +264,7 @@ impl SpectrumBatchBuilder {
                 self.precursor_native_id.append_null();
                 self.precursor_activation.append_null();
                 self.precursor_analyzer.append_null();
+                self.precursor_ccs.append_null();
             }
         }
 
@@ -323,6 +328,7 @@ impl SpectrumBatchBuilder {
             Arc::new(self.precursor_native_id.finish()),
             Arc::new(self.precursor_activation.finish()),
             Arc::new(self.precursor_analyzer.finish()),
+            Arc::new(self.precursor_ccs.finish()),
             Arc::new(self.mz.finish()),
             Arc::new(self.intensity.finish()),
             Arc::new(self.inv_mobility_per_peak.finish()),
@@ -388,7 +394,7 @@ mod tests {
         b.push(&rec(1, 2, 4, false));
         let batch = b.finish().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.schema().fields().len(), 30);
+        assert_eq!(batch.schema().fields().len(), 31);
         let mz_col = batch
             .column_by_name("mz")
             .unwrap()

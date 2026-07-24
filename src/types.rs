@@ -53,6 +53,12 @@ pub struct PrecursorInfo {
     /// Analyzer that recorded the precursor scan; needed by mzML to
     /// disambiguate CID vs beam-type CID on FTMS instruments.
     pub analyzer: Option<Analyzer>,
+    /// Collision cross-sectional area of the selected ion, in square
+    /// angstroms. Derived from ion-mobility measurements (Bruker 1/K0,
+    /// Waters drift time, etc); vendors that only expose raw mobility
+    /// should convert before populating this rather than leaving it for
+    /// downstream consumers to guess a calibration.
+    pub ccs: Option<f64>,
 }
 
 /// One fully-decoded spectrum.
@@ -192,6 +198,10 @@ pub struct RunMetadata {
     pub native_id_format: CvTerm,
     /// Instrument CV term. Vendors resolve this from their own model lookup.
     pub instrument: CvTerm,
+    /// Serial number of the physical instrument, when the vendor's metadata
+    /// exposes one. Emitted as `MS:1000529` ("instrument serial number") on
+    /// the default `instrumentConfiguration`.
+    pub instrument_serial_number: Option<String>,
     /// Software identifier (e.g. `"opentfraw"`).
     pub software_name: String,
     pub software_version: String,
@@ -201,4 +211,17 @@ pub struct RunMetadata {
     /// spectra in this run. `None` is treated as the Bruker convention
     /// ([`MobilityArrayKind::InverseReducedVsPerCm2`]) for back-compat.
     pub mobility_array_kind: Option<MobilityArrayKind>,
+    /// Physical mass-analyzer components this instrument has, in a stable
+    /// order. Static instrument configuration, not derived from scan data -
+    /// vendors already resolve `instrument` from a model lookup, so this is
+    /// the same kind of fixed lookup.
+    ///
+    /// Each entry gets its own `<instrumentConfiguration>` (in addition to
+    /// the default `IC1` built from `instrument`), and any spectrum whose
+    /// [`SpectrumRecord::analyzer`](crate::types::SpectrumRecord::analyzer)
+    /// matches one of these gets an `instrumentConfigurationRef` pointing at
+    /// it, so hybrid instruments (e.g. quad/ion-trap MS2 vs Orbitrap MS1 on
+    /// a Fusion) preserve per-scan analyzer identity. Leave empty to keep
+    /// the previous single-`IC1`-for-everything behavior.
+    pub analyzers: Vec<Analyzer>,
 }

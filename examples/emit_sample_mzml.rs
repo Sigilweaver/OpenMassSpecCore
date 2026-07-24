@@ -31,12 +31,18 @@ impl SampleSource {
             source_file_format: CvTerm::new("MS:1000563", "Thermo RAW format"),
             native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
             instrument: CvTerm::new("MS:1001911", "Q Exactive"),
+            instrument_serial_number: Some("SN-EXAMPLE-001".into()),
             software_name: "openmassspec-core-sample".into(),
             software_version: env!("CARGO_PKG_VERSION").into(),
             // Exercises the `startTimeStamp` attribute path so it is
             // schema-checked without a vendor file.
             start_timestamp: Some("2026-06-01T14:30:00Z".into()),
             mobility_array_kind: Some(MobilityArrayKind::InverseReducedVsPerCm2),
+            // Exercises the per-spectrum `instrumentConfigurationRef` path:
+            // the FTMS (Orbitrap) spectra below get one instrumentConfiguration
+            // and the TOFMS one gets another, so it is schema-checked without
+            // a vendor file.
+            analyzers: vec![Analyzer::FTMS, Analyzer::TOFMS],
         };
         let ms1 = SpectrumRecord {
             index: 0,
@@ -90,6 +96,9 @@ impl SampleSource {
                 precursor_native_id: Some("controllerType=0 controllerNumber=1 scan=1".into()),
                 activation: Some(Activation::CID),
                 analyzer: Some(Analyzer::FTMS),
+                // Exercises the `collisional cross sectional area` selectedIon
+                // cvParam path so it is schema-checked without a vendor file.
+                ccs: Some(153.4),
             }),
             mz: vec![150.5, 160.0],
             intensity: vec![99.0, 50.0],

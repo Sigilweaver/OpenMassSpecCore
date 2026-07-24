@@ -19,10 +19,12 @@ impl ToySource {
             source_file_format: CvTerm::new("MS:1000563", "Thermo RAW format"),
             native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
             instrument: CvTerm::new("MS:1001911", "Q Exactive"),
+            instrument_serial_number: None,
             software_name: "toy-writer".into(),
             software_version: "0.0.0".into(),
             start_timestamp: None,
             mobility_array_kind: None,
+            analyzers: Vec::new(),
         };
         let s1 = SpectrumRecord {
             index: 0,
@@ -76,6 +78,7 @@ impl ToySource {
                 precursor_native_id: Some("controllerType=0 controllerNumber=1 scan=1".into()),
                 activation: Some(Activation::CID),
                 analyzer: Some(Analyzer::FTMS),
+                ccs: None,
             }),
             mz: vec![150.5, 160.0],
             intensity: vec![99.0, 50.0],
