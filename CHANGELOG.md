@@ -38,6 +38,14 @@ crate adheres to [Semantic Versioning](https://semver.org/).
   CCS - previously there was nowhere in this crate to put the result.
   Source-breaking the same way as the two entries above (closes #5).
 
+### Fixed
+
+- The `arrow` feature's `SpectrumBatchBuilder` now includes a `faims_cv`
+  column. `SpectrumRecord::faims_cv` (added in 1.2.0) was the one field
+  missing from the schema's otherwise-complete 1:1 mirror of
+  `SpectrumRecord`/`PrecursorInfo` - Arrow consumers silently lost FAIMS
+  compensation voltage even though the mzML writer emitted it correctly.
+
 ## [1.2.0] - 2026-07-15
 
 ### Added

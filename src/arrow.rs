@@ -51,6 +51,7 @@ pub fn spectrum_record_schema() -> SchemaRef {
         Field::new("high_mz", DataType::Float64, true),
         Field::new("ion_injection_time_ms", DataType::Float64, true),
         Field::new("inv_mobility", DataType::Float64, true),
+        Field::new("faims_cv", DataType::Float64, true),
         Field::new("precursor_target_mz", DataType::Float64, true),
         Field::new("precursor_selected_mz", DataType::Float64, true),
         Field::new("precursor_isolation_width", DataType::Float64, true),
@@ -142,6 +143,7 @@ pub struct SpectrumBatchBuilder {
     high_mz: Float64Builder,
     ion_injection_time_ms: Float64Builder,
     inv_mobility: Float64Builder,
+    faims_cv: Float64Builder,
     precursor_target_mz: Float64Builder,
     precursor_selected_mz: Float64Builder,
     precursor_isolation_width: Float64Builder,
@@ -183,6 +185,7 @@ impl SpectrumBatchBuilder {
             high_mz: Float64Builder::new(),
             ion_injection_time_ms: Float64Builder::new(),
             inv_mobility: Float64Builder::new(),
+            faims_cv: Float64Builder::new(),
             precursor_target_mz: Float64Builder::new(),
             precursor_selected_mz: Float64Builder::new(),
             precursor_isolation_width: Float64Builder::new(),
@@ -233,6 +236,7 @@ impl SpectrumBatchBuilder {
         self.ion_injection_time_ms
             .append_option(rec.ion_injection_time_ms);
         self.inv_mobility.append_option(rec.inv_mobility);
+        self.faims_cv.append_option(rec.faims_cv);
 
         match &rec.precursor {
             Some(p) => {
@@ -318,6 +322,7 @@ impl SpectrumBatchBuilder {
             Arc::new(self.high_mz.finish()),
             Arc::new(self.ion_injection_time_ms.finish()),
             Arc::new(self.inv_mobility.finish()),
+            Arc::new(self.faims_cv.finish()),
             Arc::new(self.precursor_target_mz.finish()),
             Arc::new(self.precursor_selected_mz.finish()),
             Arc::new(self.precursor_isolation_width.finish()),
@@ -369,7 +374,7 @@ mod tests {
             high_mz: mz.last().copied(),
             ion_injection_time_ms: None,
             inv_mobility: None,
-            faims_cv: None,
+            faims_cv: if index == 0 { Some(-40.0) } else { None },
             precursor: if ms_level >= 2 {
                 Some(PrecursorInfo {
                     target_mz: Some(500.0),
@@ -394,7 +399,7 @@ mod tests {
         b.push(&rec(1, 2, 4, false));
         let batch = b.finish().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.schema().fields().len(), 31);
+        assert_eq!(batch.schema().fields().len(), 32);
         let mz_col = batch
             .column_by_name("mz")
             .unwrap()
@@ -411,5 +416,13 @@ mod tests {
             .unwrap();
         assert!(mob_col.is_valid(0));
         assert!(mob_col.is_null(1));
+        let faims_col = batch
+            .column_by_name("faims_cv")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow_array::Float64Array>()
+            .unwrap();
+        assert_eq!(faims_col.value(0), -40.0);
+        assert!(faims_col.is_null(1));
     }
 }
