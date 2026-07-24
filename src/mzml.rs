@@ -527,23 +527,13 @@ fn write_spectrum<W: Write>(
             .find(|(candidate, _)| *candidate == a)
             .map(|(_, id)| id.as_str())
     });
-    match ic_ref {
-        Some(id) => writeln!(
-            out,
-            r#"      <spectrum id="{sid}" index="{idx}" defaultArrayLength="{n}" instrumentConfigurationRef="{icid}">"#,
-            sid = escape(&rec.native_id),
-            idx = rec.index,
-            n = n_peaks,
-            icid = id
-        )?,
-        None => writeln!(
-            out,
-            r#"      <spectrum id="{sid}" index="{idx}" defaultArrayLength="{n}">"#,
-            sid = escape(&rec.native_id),
-            idx = rec.index,
-            n = n_peaks
-        )?,
-    }
+    writeln!(
+        out,
+        r#"      <spectrum id="{sid}" index="{idx}" defaultArrayLength="{n}">"#,
+        sid = escape(&rec.native_id),
+        idx = rec.index,
+        n = n_peaks
+    )?;
     writeln!(
         out,
         r#"        <cvParam cvRef="MS" accession="MS:1000511" name="ms level" value="{}"/>"#,
@@ -613,7 +603,10 @@ fn write_spectrum<W: Write>(
         out,
         r#"          <cvParam cvRef="MS" accession="MS:1000795" name="no combination" value=""/>"#
     )?;
-    writeln!(out, r#"          <scan>"#)?;
+    match ic_ref {
+        Some(id) => writeln!(out, r#"          <scan instrumentConfigurationRef="{id}">"#)?,
+        None => writeln!(out, r#"          <scan>"#)?,
+    }
 
     if let Some(f) = rec.filter.as_deref() {
         if !f.is_empty() {
