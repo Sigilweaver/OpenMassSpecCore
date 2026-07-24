@@ -214,10 +214,11 @@ pub fn write_mzml<S: SpectrumSource + ?Sized, W: Write>(src: &mut S, out: &mut W
     let meta = src.run_metadata();
     let count = src.spectrum_count_hint().unwrap_or(0);
     let mobility_kind = meta.mobility_array_kind;
+    let analyzer_ic_ids = analyzer_ic_table(&meta.analyzers);
 
     write_prologue(out, &meta, count, false)?;
     for rec in src.iter_spectra() {
-        write_spectrum(out, &rec, mobility_kind)?;
+        write_spectrum(out, &rec, mobility_kind, &analyzer_ic_ids)?;
     }
     writeln!(out, r#"    </spectrumList>"#)?;
 
@@ -248,6 +249,7 @@ pub fn write_indexed_mzml<S: SpectrumSource + ?Sized, W: Write>(
     let meta = src.run_metadata();
     let count = src.spectrum_count_hint().unwrap_or(0);
     let mobility_kind = meta.mobility_array_kind;
+    let analyzer_ic_ids = analyzer_ic_table(&meta.analyzers);
 
     let mut cw = CountingWriter::new(out);
     write_prologue(&mut cw, &meta, count, true)?;
@@ -255,7 +257,7 @@ pub fn write_indexed_mzml<S: SpectrumSource + ?Sized, W: Write>(
     let mut offsets: Vec<(String, u64)> = Vec::with_capacity(count);
     for rec in src.iter_spectra() {
         offsets.push((rec.native_id.clone(), cw.pos));
-        write_spectrum(&mut cw, &rec, mobility_kind)?;
+        write_spectrum(&mut cw, &rec, mobility_kind, &analyzer_ic_ids)?;
     }
 
     writeln!(cw, r#"    </spectrumList>"#)?;
@@ -407,10 +409,31 @@ fn write_prologue<W: Write>(
     writeln!(out, r#"    </software>"#)?;
     writeln!(out, r#"  </softwareList>"#)?;
 
-    writeln!(out, r#"  <instrumentConfigurationList count="1">"#)?;
+    writeln!(
+        out,
+        r#"  <instrumentConfigurationList count="{}">"#,
+        1 + meta.analyzers.len()
+    )?;
     writeln!(out, r#"    <instrumentConfiguration id="IC1">"#)?;
     write_cv(out, "      ", &meta.instrument)?;
+    if let Some(serial) = &meta.instrument_serial_number {
+        writeln!(
+            out,
+            r#"      <cvParam cvRef="MS" accession="MS:1000529" name="instrument serial number" value="{}"/>"#,
+            escape(serial)
+        )?;
+    }
     writeln!(out, r#"    </instrumentConfiguration>"#)?;
+    for (analyzer, id) in analyzer_ic_table(&meta.analyzers) {
+        let (acc, name) = analyzer_cv(analyzer);
+        writeln!(out, r#"    <instrumentConfiguration id="{id}">"#)?;
+        write_cv(out, "      ", &meta.instrument)?;
+        writeln!(
+            out,
+            r#"      <cvParam cvRef="MS" accession="{acc}" name="{name}" value=""/>"#
+        )?;
+        writeln!(out, r#"    </instrumentConfiguration>"#)?;
+    }
     writeln!(out, r#"  </instrumentConfigurationList>"#)?;
 
     writeln!(out, r#"  <dataProcessingList count="1">"#)?;
@@ -449,6 +472,33 @@ fn write_prologue<W: Write>(
     Ok(())
 }
 
+/// PSI-MS mass-analyzer-component CV term for each [`Analyzer`] variant.
+///
+/// `FTMS` covers both Orbitrap and FT-ICR instruments (see the enum's own
+/// doc comment); this maps it to `orbitrap` since that is by far the more
+/// common physical analyzer behind a "FTMS" scan-filter token across the
+/// vendors this crate supports. FT-ICR instruments will be mislabeled.
+fn analyzer_cv(analyzer: Analyzer) -> (&'static str, &'static str) {
+    match analyzer {
+        Analyzer::ITMS => ("MS:1000264", "ion trap"),
+        Analyzer::TQMS | Analyzer::SQMS => ("MS:1000081", "quadrupole"),
+        Analyzer::TOFMS => ("MS:1000084", "time-of-flight"),
+        Analyzer::FTMS => ("MS:1000484", "orbitrap"),
+        Analyzer::Sector => ("MS:1000080", "magnetic sector"),
+    }
+}
+
+/// Assigns `instrumentConfiguration` ids (`IC2`, `IC3`, ...) to
+/// `meta.analyzers`, in order. `IC1` is reserved for the default
+/// configuration built from `meta.instrument`.
+fn analyzer_ic_table(analyzers: &[Analyzer]) -> Vec<(Analyzer, String)> {
+    analyzers
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (*a, format!("IC{}", i + 2)))
+        .collect()
+}
+
 fn write_cv<W: Write>(out: &mut W, indent: &str, cv: &CvTerm) -> Result<()> {
     writeln!(
         out,
@@ -462,6 +512,7 @@ fn write_spectrum<W: Write>(
     out: &mut W,
     rec: &SpectrumRecord,
     mobility_kind: Option<MobilityArrayKind>,
+    analyzer_ic_ids: &[(Analyzer, String)],
 ) -> Result<()> {
     let spectrum_type = if rec.ms_level <= 1 {
         ("MS:1000579", "MS1 spectrum")
@@ -470,13 +521,29 @@ fn write_spectrum<W: Write>(
     };
     let n_peaks = rec.mz.len();
 
-    writeln!(
-        out,
-        r#"      <spectrum id="{id}" index="{idx}" defaultArrayLength="{n}">"#,
-        id = escape(&rec.native_id),
-        idx = rec.index,
-        n = n_peaks
-    )?;
+    let ic_ref = rec.analyzer.and_then(|a| {
+        analyzer_ic_ids
+            .iter()
+            .find(|(candidate, _)| *candidate == a)
+            .map(|(_, id)| id.as_str())
+    });
+    match ic_ref {
+        Some(id) => writeln!(
+            out,
+            r#"      <spectrum id="{sid}" index="{idx}" defaultArrayLength="{n}" instrumentConfigurationRef="{icid}">"#,
+            sid = escape(&rec.native_id),
+            idx = rec.index,
+            n = n_peaks,
+            icid = id
+        )?,
+        None => writeln!(
+            out,
+            r#"      <spectrum id="{sid}" index="{idx}" defaultArrayLength="{n}">"#,
+            sid = escape(&rec.native_id),
+            idx = rec.index,
+            n = n_peaks
+        )?,
+    }
     writeln!(
         out,
         r#"        <cvParam cvRef="MS" accession="MS:1000511" name="ms level" value="{}"/>"#,
@@ -663,6 +730,13 @@ fn write_spectrum<W: Write>(
                     out,
                     r#"                <cvParam cvRef="MS" accession="MS:1000042" name="peak intensity" value="{:.6}"/>"#,
                     i
+                )?;
+            }
+            if let Some(ccs) = pre.ccs {
+                writeln!(
+                    out,
+                    r#"                <cvParam cvRef="MS" accession="MS:1002954" name="collisional cross sectional area" value="{:.6}" unitCvRef="UO" unitAccession="UO:0000324" unitName="square angstrom"/>"#,
+                    ccs
                 )?;
             }
             writeln!(out, r#"              </selectedIon>"#)?;
@@ -922,6 +996,8 @@ mod tests {
 
     struct ToySource {
         start_timestamp: Option<String>,
+        instrument_serial_number: Option<String>,
+        analyzers: Vec<Analyzer>,
         spectra: Vec<SpectrumRecord>,
         chroms: Vec<ChromatogramRecord>,
     }
@@ -930,6 +1006,8 @@ mod tests {
         fn new() -> Self {
             Self {
                 start_timestamp: None,
+                instrument_serial_number: None,
+                analyzers: Vec::new(),
                 spectra: vec![minimal_spectrum(0, None)],
                 chroms: Vec::new(),
             }
@@ -943,10 +1021,12 @@ mod tests {
                 source_file_format: CvTerm::new("MS:1000563", "Thermo RAW format"),
                 native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
                 instrument: CvTerm::new("MS:1001911", "Q Exactive"),
+                instrument_serial_number: self.instrument_serial_number.clone(),
                 software_name: "toy".into(),
                 software_version: "0.0.0".into(),
                 start_timestamp: self.start_timestamp.clone(),
                 mobility_array_kind: None,
+                analyzers: self.analyzers.clone(),
             }
         }
 
@@ -1038,6 +1118,85 @@ mod tests {
     }
 
     #[test]
+    fn instrument_serial_number_emitted_when_present() {
+        let mut src = ToySource::new();
+        src.instrument_serial_number = Some("SN12345".into());
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(
+            r#"<cvParam cvRef="MS" accession="MS:1000529" name="instrument serial number" value="SN12345"/>"#
+        ));
+    }
+
+    #[test]
+    fn instrument_serial_number_omitted_when_absent() {
+        let mut src = ToySource::new();
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(!s.contains("MS:1000529"));
+    }
+
+    #[test]
+    fn no_extra_instrument_configurations_when_analyzers_empty() {
+        let mut src = ToySource::new();
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<instrumentConfigurationList count="1">"#));
+        assert!(!s.contains("instrumentConfigurationRef"));
+    }
+
+    #[test]
+    fn per_spectrum_instrument_configuration_ref_matches_analyzer() {
+        let mut src = ToySource::new();
+        src.analyzers = vec![Analyzer::FTMS, Analyzer::ITMS];
+        src.spectra = vec![
+            SpectrumRecord {
+                analyzer: Some(Analyzer::FTMS),
+                ..minimal_spectrum(0, None)
+            },
+            SpectrumRecord {
+                index: 1,
+                native_id: "controllerType=0 controllerNumber=1 scan=2".into(),
+                analyzer: Some(Analyzer::ITMS),
+                ..minimal_spectrum(1, None)
+            },
+        ];
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+
+        assert!(s.contains(r#"<instrumentConfigurationList count="3">"#));
+        assert!(s.contains(r#"<instrumentConfiguration id="IC2">"#));
+        assert!(
+            s.contains(r#"<cvParam cvRef="MS" accession="MS:1000484" name="orbitrap" value=""/>"#)
+        );
+        assert!(s.contains(r#"<instrumentConfiguration id="IC3">"#));
+        assert!(
+            s.contains(r#"<cvParam cvRef="MS" accession="MS:1000264" name="ion trap" value=""/>"#)
+        );
+
+        assert!(s.contains(r#"instrumentConfigurationRef="IC2""#));
+        assert!(s.contains(r#"instrumentConfigurationRef="IC3""#));
+    }
+
+    #[test]
+    fn spectrum_with_unmatched_analyzer_gets_no_ref() {
+        let mut src = ToySource::new();
+        src.analyzers = vec![Analyzer::FTMS];
+        src.spectra = vec![SpectrumRecord {
+            analyzer: Some(Analyzer::TOFMS),
+            ..minimal_spectrum(0, None)
+        }];
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(!s.contains("instrumentConfigurationRef"));
+    }
+
+    #[test]
     fn faims_cv_emitted_when_present() {
         let mut src = ToySource::new();
         src.spectra = vec![minimal_spectrum(0, Some(-45.0))];
@@ -1056,6 +1215,43 @@ mod tests {
         write_mzml(&mut src, &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(!s.contains("MS:1001581"));
+    }
+
+    #[test]
+    fn ccs_emitted_on_selected_ion_when_present() {
+        let mut src = ToySource::new();
+        src.spectra = vec![SpectrumRecord {
+            ms_level: 2,
+            precursor: Some(crate::types::PrecursorInfo {
+                selected_mz: Some(500.5),
+                ccs: Some(153.4),
+                ..Default::default()
+            }),
+            ..minimal_spectrum(0, None)
+        }];
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(
+            r#"<cvParam cvRef="MS" accession="MS:1002954" name="collisional cross sectional area" value="153.400000" unitCvRef="UO" unitAccession="UO:0000324" unitName="square angstrom"/>"#
+        ));
+    }
+
+    #[test]
+    fn ccs_omitted_when_absent() {
+        let mut src = ToySource::new();
+        src.spectra = vec![SpectrumRecord {
+            ms_level: 2,
+            precursor: Some(crate::types::PrecursorInfo {
+                selected_mz: Some(500.5),
+                ..Default::default()
+            }),
+            ..minimal_spectrum(0, None)
+        }];
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(!s.contains("MS:1002954"));
     }
 
     #[test]

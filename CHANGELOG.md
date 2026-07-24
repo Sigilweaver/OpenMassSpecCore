@@ -6,6 +6,38 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-24
+
+### Added
+
+- `RunMetadata::instrument_serial_number`, an `Option<String>` carrying the
+  physical instrument's serial number. The writer emits it as an
+  `MS:1000529` ("instrument serial number") cvParam on the default
+  `instrumentConfiguration` when present. Adding this field is a
+  source-breaking change for any code that constructs a `RunMetadata`
+  literal - existing vendor crates need one line added at their
+  `RunMetadata` construction site(s) (closes #7).
+- `RunMetadata::analyzers`, a `Vec<Analyzer>` declaring the instrument's
+  physical mass-analyzer components. Each entry gets its own
+  `<instrumentConfiguration>` (`IC2`, `IC3`, ...) with the matching PSI-MS
+  analyzer-component cvParam, and `write_spectrum` now reads
+  `SpectrumRecord::analyzer` (previously captured but never emitted) to add
+  a per-spectrum `instrumentConfigurationRef`, so hybrid instruments that
+  switch analyzers scan-to-scan (e.g. quad/ion-trap MS2 vs Orbitrap MS1 on
+  a Fusion) keep that identity instead of losing it to a single blanket
+  `IC1`. Leaving `analyzers` empty keeps the previous single-`IC1`-for-
+  everything output byte-for-byte. Also source-breaking the same way as
+  `instrument_serial_number` above (closes #6).
+- `PrecursorInfo::ccs`, an `Option<f64>` carrying the selected ion's
+  collision cross-sectional area in square angstroms. The writer emits it
+  as an `MS:1002954` ("collisional cross sectional area") cvParam on the
+  precursor's `selectedIon` when present, and it round-trips through the
+  optional `arrow` feature's `precursor_ccs` column. This is the shared-
+  schema field OpenTimsTDF#14 (Bruker 1/K0) and OpenWRaw#10 (Waters drift
+  time) need once they convert their vendor-native ion-mobility values to
+  CCS - previously there was nowhere in this crate to put the result.
+  Source-breaking the same way as the two entries above (closes #5).
+
 ## [1.2.0] - 2026-07-15
 
 ### Added

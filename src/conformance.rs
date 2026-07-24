@@ -316,10 +316,12 @@ mod tests {
                     accession: "MS:1000483",
                     name: "Thermo Fisher Scientific instrument model".into(),
                 },
+                instrument_serial_number: None,
                 software_name: "test".into(),
                 software_version: "0.0".into(),
                 start_timestamp: None,
                 mobility_array_kind: None,
+                analyzers: Vec::new(),
             }
         }
         fn iter_spectra<'a>(&'a mut self) -> Box<dyn Iterator<Item = SpectrumRecord> + 'a> {

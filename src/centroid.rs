@@ -172,10 +172,12 @@ mod tests {
                     source_file_format: CvTerm::new("MS:1000563", "Thermo RAW format"),
                     native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
                     instrument: CvTerm::new("MS:1001911", "Q Exactive"),
+                    instrument_serial_number: None,
                     software_name: "toy-writer".into(),
                     software_version: "0.0.0".into(),
                     start_timestamp: None,
                     mobility_array_kind: None,
+                    analyzers: Vec::new(),
                 },
                 rec: Some(rec),
             }
