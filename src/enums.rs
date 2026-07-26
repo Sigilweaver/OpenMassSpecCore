@@ -82,6 +82,25 @@ pub enum Activation {
     EThcD,
 }
 
+/// Compression codec applied to a `<binaryDataArray>`'s `<binary>` payload
+/// by the mzML writer.
+///
+/// Selects both the bytes actually written (compressed or not) and the
+/// matching PSI-MS cvParam. `Zlib` is the default for
+/// [`crate::write_mzml`]/[`crate::write_indexed_mzml`], matching
+/// msconvert/OpenMS output; pass `NoCompression` to
+/// [`crate::write_mzml_with_compression`]/
+/// [`crate::write_indexed_mzml_with_compression`] to keep the previous
+/// (pre-1.4) uncompressed byte layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Compression {
+    /// No compression: `MS:1000576` ("no compression").
+    NoCompression,
+    /// DEFLATE/zlib compression: `MS:1000574` ("zlib compression").
+    #[default]
+    Zlib,
+}
+
 /// Unit + meaning of a per-peak ion mobility array.
 ///
 /// Selects the CV term and unit emitted by the mzML writer when a
