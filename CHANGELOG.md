@@ -6,6 +6,32 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `RunMetadata::acquisition_software_name` and
+  `RunMetadata::acquisition_software_version`, both `Option<String>`,
+  carrying the name/version of the original vendor acquisition software
+  that recorded a run (Xcalibur, MassHunter, Analyst, LabSolutions, etc).
+  This is distinct from the existing `software_name`/`software_version`
+  fields, which identify the vendor-reader crate producing the mzML, not
+  the instrument-control software that acquired the data. `softwareList`
+  previously hardcoded a single `<software>` entry for the reader itself,
+  so this provenance was dropped even where a vendor reader's own
+  instrument-method metadata already exposes it - msconvert-produced
+  files preserve it, ours did not. The writer now emits a second
+  `<software>` entry (fixed id `acquisition_software`, since an
+  arbitrary vendor-reported name may contain characters, such as a
+  space, that are not valid in an XML `xs:ID`) when
+  `acquisition_software_name` is present, using the same generic
+  `MS:1000799` ("custom unreleased software tool") cvParam already used
+  for the reader's own entry; mapping specific vendor names to their own
+  PSI-MS CV term is left for a follow-up; each vendor string would need
+  to be checked against the CV rather than guessed. Adding these fields
+  is a source-breaking change for any code that constructs a
+  `RunMetadata` literal - existing vendor crates need two lines added
+  (both may default to `None`) at their `RunMetadata` construction
+  site(s) (closes #10, contributed by @Nabejo).
+
 ## [1.3.0] - 2026-07-24
 
 ### Added
