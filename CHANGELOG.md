@@ -6,6 +6,20 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `write_mzml`/`write_indexed_mzml` now emit an `MS:1000035` ("peak
+  picking") `<processingMethod>` step in the `<dataProcessingList>` when
+  the spectrum stream passed in has been wrapped in `Centroided`;
+  previously only the blanket `MS:1000544` ("Conversion to mzML") step
+  was ever recorded, so mzML written from a centroided stream carried
+  per-spectrum centroid-mode cvParams with no matching processing-history
+  entry - a provenance gap most mzML consumers/validators expect to be
+  internally consistent. Added `SpectrumSource::additional_processing_steps`
+  (default: none) so adapters can advertise steps like this; sources that
+  don't use `Centroided` are unaffected and produce byte-for-byte
+  identical output (closes #9, contributed by @Nabejo).
+
 ## [1.3.0] - 2026-07-24
 
 ### Added

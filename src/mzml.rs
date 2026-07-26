@@ -215,8 +215,9 @@ pub fn write_mzml<S: SpectrumSource + ?Sized, W: Write>(src: &mut S, out: &mut W
     let count = src.spectrum_count_hint().unwrap_or(0);
     let mobility_kind = meta.mobility_array_kind;
     let analyzer_ic_ids = analyzer_ic_table(&meta.analyzers);
+    let extra_processing = src.additional_processing_steps();
 
-    write_prologue(out, &meta, count, false)?;
+    write_prologue(out, &meta, count, false, &extra_processing)?;
     for rec in src.iter_spectra() {
         write_spectrum(out, &rec, mobility_kind, &analyzer_ic_ids)?;
     }
@@ -250,9 +251,10 @@ pub fn write_indexed_mzml<S: SpectrumSource + ?Sized, W: Write>(
     let count = src.spectrum_count_hint().unwrap_or(0);
     let mobility_kind = meta.mobility_array_kind;
     let analyzer_ic_ids = analyzer_ic_table(&meta.analyzers);
+    let extra_processing = src.additional_processing_steps();
 
     let mut cw = CountingWriter::new(out);
-    write_prologue(&mut cw, &meta, count, true)?;
+    write_prologue(&mut cw, &meta, count, true, &extra_processing)?;
 
     let mut offsets: Vec<(String, u64)> = Vec::with_capacity(count);
     for rec in src.iter_spectra() {
@@ -328,6 +330,7 @@ fn write_prologue<W: Write>(
     meta: &RunMetadata,
     n_spectra: usize,
     indexed: bool,
+    extra_processing: &[(&'static str, &'static str)],
 ) -> Result<()> {
     writeln!(out, r#"<?xml version="1.0" encoding="utf-8"?>"#)?;
     if indexed {
@@ -448,6 +451,23 @@ fn write_prologue<W: Write>(
         r#"        <cvParam cvRef="MS" accession="MS:1000544" name="Conversion to mzML" value=""/>"#
     )?;
     writeln!(out, r#"      </processingMethod>"#)?;
+    // Adapters that transform spectra before they reach the writer (e.g.
+    // `Centroided` peak-picking) contribute additional steps here so the
+    // file's processing history stays consistent with what was actually
+    // done to the data (see `SpectrumSource::additional_processing_steps`).
+    for (order, (accession, name)) in extra_processing.iter().enumerate() {
+        writeln!(
+            out,
+            r#"      <processingMethod order="{}" softwareRef="{}">"#,
+            order + 1,
+            escape(&meta.software_name)
+        )?;
+        writeln!(
+            out,
+            r#"        <cvParam cvRef="MS" accession="{accession}" name="{name}" value=""/>"#
+        )?;
+        writeln!(out, r#"      </processingMethod>"#)?;
+    }
     writeln!(out, r#"    </dataProcessing>"#)?;
     writeln!(out, r#"  </dataProcessingList>"#)?;
 
@@ -993,6 +1013,7 @@ mod tests {
         analyzers: Vec<Analyzer>,
         spectra: Vec<SpectrumRecord>,
         chroms: Vec<ChromatogramRecord>,
+        extra_processing: Vec<(&'static str, &'static str)>,
     }
 
     impl ToySource {
@@ -1003,6 +1024,7 @@ mod tests {
                 analyzers: Vec::new(),
                 spectra: vec![minimal_spectrum(0, None)],
                 chroms: Vec::new(),
+                extra_processing: Vec::new(),
             }
         }
     }
@@ -1035,6 +1057,10 @@ mod tests {
 
         fn spectrum_count_hint(&self) -> Option<usize> {
             Some(self.spectra.len())
+        }
+
+        fn additional_processing_steps(&self) -> Vec<(&'static str, &'static str)> {
+            self.extra_processing.clone()
         }
     }
 
@@ -1139,6 +1165,39 @@ mod tests {
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains(r#"<instrumentConfigurationList count="1">"#));
         assert!(!s.contains("instrumentConfigurationRef"));
+    }
+
+    #[test]
+    fn no_additional_processing_steps_leaves_data_processing_list_untouched() {
+        let mut src = ToySource::new();
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<dataProcessingList count="1">"#));
+        assert!(s.contains(r#"<processingMethod order="0" softwareRef="toy">"#));
+        assert!(!s.contains(r#"<processingMethod order="1""#));
+    }
+
+    #[test]
+    fn additional_processing_steps_appended_in_order_after_conversion_step() {
+        let mut src = ToySource::new();
+        src.extra_processing = vec![("MS:1000035", "peak picking"), ("MS:1001485", "smoothing")];
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+
+        assert!(s.contains(r#"<dataProcessingList count="1">"#));
+        let conversion = s.find(r#"<processingMethod order="0""#).unwrap();
+        let peak_picking = s.find(r#"<processingMethod order="1""#).unwrap();
+        let smoothing = s.find(r#"<processingMethod order="2""#).unwrap();
+        assert!(conversion < peak_picking);
+        assert!(peak_picking < smoothing);
+        assert!(s.contains(
+            r#"<cvParam cvRef="MS" accession="MS:1000035" name="peak picking" value=""/>"#
+        ));
+        assert!(
+            s.contains(r#"<cvParam cvRef="MS" accession="MS:1001485" name="smoothing" value=""/>"#)
+        );
     }
 
     #[test]
