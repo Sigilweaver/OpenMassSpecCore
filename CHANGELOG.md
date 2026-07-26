@@ -6,6 +6,19 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Unit tests for the hand-rolled SHA-1 implementation backing indexed
+  mzML's `<fileChecksum>` (`src/mzml.rs`), checked against NIST/FIPS
+  180-1 test vectors and message lengths chosen to exercise the
+  padding-block boundaries (empty, 56, 64, and 1000 bytes), plus a
+  streaming-vs-single-shot equivalence check. Also adds an integration
+  test that generates a small indexed-mzML document, recomputes its
+  checksum with a second, independent SHA-1 implementation, and asserts
+  it matches the embedded `fileChecksum`. Previously nothing in the
+  crate would have caught a future refactor silently breaking the hash
+  (contributed by @Nabejo, closes #11).
+
 ## [1.3.0] - 2026-07-24
 
 ### Added
