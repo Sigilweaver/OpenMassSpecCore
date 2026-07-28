@@ -394,7 +394,11 @@ fn write_prologue<W: Write>(
     writeln!(out, r#"    </sourceFileList>"#)?;
     writeln!(out, r#"  </fileDescription>"#)?;
 
-    writeln!(out, r#"  <softwareList count="1">"#)?;
+    writeln!(
+        out,
+        r#"  <softwareList count="{}">"#,
+        1 + usize::from(meta.acquisition_software_name.is_some())
+    )?;
     writeln!(
         out,
         r#"    <software id="{}" version="{}">"#,
@@ -407,6 +411,32 @@ fn write_prologue<W: Write>(
         escape(&meta.software_name)
     )?;
     writeln!(out, r#"    </software>"#)?;
+    if let Some(name) = &meta.acquisition_software_name {
+        // A fixed id (rather than one derived from `name`) because `name`
+        // comes from vendor metadata and is not guaranteed to be a valid
+        // XML `xs:ID` (e.g. it may contain spaces, as "Xcalibur 4.4" would).
+        // No `processingMethod` references this software, so a fixed id
+        // has no downstream effect.
+        writeln!(
+            out,
+            r#"    <software id="acquisition_software" version="{}">"#,
+            escape(meta.acquisition_software_version.as_deref().unwrap_or(""))
+        )?;
+        // The specific vendor acquisition software (Xcalibur, MassHunter,
+        // Analyst, LabSolutions, ...) each has its own PSI-MS CV term, but
+        // mapping vendor-reported name strings to the correct accession
+        // reliably would require verifying every vendor's exact string
+        // against the CV - not done here, so this falls back to the same
+        // generic "custom unreleased software tool" term used for the
+        // writer's own software above, with the real name preserved as
+        // the cvParam value.
+        writeln!(
+            out,
+            r#"      <cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="{}"/>"#,
+            escape(name)
+        )?;
+        writeln!(out, r#"    </software>"#)?;
+    }
     writeln!(out, r#"  </softwareList>"#)?;
 
     writeln!(
@@ -990,6 +1020,8 @@ mod tests {
     struct ToySource {
         start_timestamp: Option<String>,
         instrument_serial_number: Option<String>,
+        acquisition_software_name: Option<String>,
+        acquisition_software_version: Option<String>,
         analyzers: Vec<Analyzer>,
         spectra: Vec<SpectrumRecord>,
         chroms: Vec<ChromatogramRecord>,
@@ -1000,6 +1032,8 @@ mod tests {
             Self {
                 start_timestamp: None,
                 instrument_serial_number: None,
+                acquisition_software_name: None,
+                acquisition_software_version: None,
                 analyzers: Vec::new(),
                 spectra: vec![minimal_spectrum(0, None)],
                 chroms: Vec::new(),
@@ -1017,6 +1051,8 @@ mod tests {
                 instrument_serial_number: self.instrument_serial_number.clone(),
                 software_name: "toy".into(),
                 software_version: "0.0.0".into(),
+                acquisition_software_name: self.acquisition_software_name.clone(),
+                acquisition_software_version: self.acquisition_software_version.clone(),
                 start_timestamp: self.start_timestamp.clone(),
                 mobility_array_kind: None,
                 analyzers: self.analyzers.clone(),
@@ -1129,6 +1165,42 @@ mod tests {
         write_mzml(&mut src, &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(!s.contains("MS:1000529"));
+    }
+
+    #[test]
+    fn acquisition_software_emitted_as_second_software_entry_when_present() {
+        let mut src = ToySource::new();
+        src.acquisition_software_name = Some("Xcalibur".into());
+        src.acquisition_software_version = Some("4.4.16.14".into());
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<softwareList count="2">"#));
+        assert!(s.contains(r#"<software id="acquisition_software" version="4.4.16.14">"#));
+        assert!(s.contains(
+            r#"<cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="Xcalibur"/>"#
+        ));
+    }
+
+    #[test]
+    fn acquisition_software_omitted_when_absent() {
+        let mut src = ToySource::new();
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<softwareList count="1">"#));
+        assert!(!s.contains("acquisition_software"));
+    }
+
+    #[test]
+    fn acquisition_software_version_defaults_to_empty_string_when_name_present_but_version_absent()
+    {
+        let mut src = ToySource::new();
+        src.acquisition_software_name = Some("MassHunter".into());
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<software id="acquisition_software" version="">"#));
     }
 
     #[test]
