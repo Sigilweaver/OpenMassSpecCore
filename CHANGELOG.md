@@ -6,6 +6,8 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-28
+
 ### Added
 
 - The mzML writer now zlib-compresses (`MS:1000574`) binary data arrays
