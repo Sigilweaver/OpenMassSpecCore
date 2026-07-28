@@ -205,6 +205,18 @@ pub struct RunMetadata {
     /// Software identifier (e.g. `"opentfraw"`).
     pub software_name: String,
     pub software_version: String,
+    /// Name of the original vendor acquisition software that recorded this
+    /// run (e.g. `"Xcalibur"`, `"MassHunter"`, `"Analyst"`, `"LabSolutions"`),
+    /// when the vendor's own instrument-method metadata exposes one. This is
+    /// distinct from `software_name`/`software_version` above, which
+    /// identify the vendor-reader crate producing this mzML, not the
+    /// instrument-control software that acquired the data. `None` when the
+    /// vendor parser does not decode this information. Emitted as a second
+    /// `<software>` entry in `<softwareList>` when present.
+    pub acquisition_software_name: Option<String>,
+    /// Version string for `acquisition_software_name`, when known. Ignored
+    /// if `acquisition_software_name` is `None`.
+    pub acquisition_software_version: Option<String>,
     /// Instrument acquisition start time (RFC 3339), when available.
     pub start_timestamp: Option<String>,
     /// Interpretation of any per-peak ion mobility array carried by the
