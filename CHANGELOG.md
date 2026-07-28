@@ -8,6 +8,19 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- The mzML writer now zlib-compresses (`MS:1000574`) binary data arrays
+  (m/z, intensity, per-peak ion mobility, and chromatogram time/intensity)
+  by default in `write_mzml`/`write_indexed_mzml`, instead of always
+  emitting them uncompressed under a hardcoded `MS:1000576` ("no
+  compression") cvParam. Output from downstream vendor crates was
+  multiples larger than msconvert/OpenMS output for the same run as a
+  result. New `write_mzml_with_compression`/
+  `write_indexed_mzml_with_compression` entry points and a `Compression`
+  enum (`Zlib` default, `NoCompression` to keep the previous byte layout)
+  give callers explicit control; the `<fileChecksum>` SHA-1 in indexed
+  output needed no code change since it already hashes the bytes actually
+  written, whichever codec produced them. Numpress support is left as a
+  follow-up. Contributed by @Nabejo (closes #8).
 - Unit tests for the hand-rolled SHA-1 implementation backing indexed
   mzML's `<fileChecksum>` (`src/mzml.rs`), checked against NIST/FIPS
   180-1 test vectors and message lengths chosen to exercise the
