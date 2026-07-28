@@ -103,6 +103,8 @@ impl OneSpectrumSource {
                 native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
                 instrument: CvTerm::new("MS:1001911", "Q Exactive"),
                 instrument_serial_number: None,
+                acquisition_software_name: None,
+                acquisition_software_version: None,
                 software_name: "checksum-test".into(),
                 software_version: "0.0.0".into(),
                 start_timestamp: None,
