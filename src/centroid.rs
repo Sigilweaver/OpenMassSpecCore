@@ -57,6 +57,12 @@ impl<S: SpectrumSource> SpectrumSource for Centroided<S> {
     fn spectrum_count_hint(&self) -> Option<usize> {
         self.inner.spectrum_count_hint()
     }
+
+    fn additional_processing_steps(&self) -> Vec<(&'static str, &'static str)> {
+        let mut steps = self.inner.additional_processing_steps();
+        steps.push(("MS:1000035", "peak picking"));
+        steps
+    }
 }
 
 fn centroid_record(mut rec: SpectrumRecord, min_intensity: f32) -> SpectrumRecord {
@@ -273,6 +279,31 @@ mod tests {
     }
 
     #[test]
+    fn additional_processing_steps_reports_peak_picking() {
+        let src = Centroided::new(OneSpectrumSource::new(profile_spectrum()));
+        assert_eq!(
+            src.additional_processing_steps(),
+            vec![("MS:1000035", "peak picking")]
+        );
+    }
+
+    #[test]
+    fn additional_processing_steps_accumulate_through_nested_adapters() {
+        // Wrapping a Centroided source in another Centroided (a no-op in
+        // practice, since it is idempotent) must not drop the inner
+        // adapter's step - steps accumulate outer-to-inner delegation.
+        let inner = Centroided::new(OneSpectrumSource::new(profile_spectrum()));
+        let outer = Centroided::new(inner);
+        assert_eq!(
+            outer.additional_processing_steps(),
+            vec![
+                ("MS:1000035", "peak picking"),
+                ("MS:1000035", "peak picking")
+            ]
+        );
+    }
+
+    #[test]
     fn wrapped_source_still_satisfies_conformance_invariants() {
         let mut src = Centroided::new(OneSpectrumSource::new(profile_spectrum()));
         let n = assert_source_invariants(&mut src).expect("conformance");
@@ -298,5 +329,11 @@ mod tests {
             ),
             "output should not still claim profile mode after centroiding"
         );
+        // The dataProcessingList must record that peak picking happened,
+        // not just the blanket "Conversion to mzML" step every writer run
+        // gets (see issue: centroiding left no provenance trail).
+        assert!(xml.contains(
+            r#"<cvParam cvRef="MS" accession="MS:1000035" name="peak picking" value=""/>"#
+        ));
     }
 }

@@ -38,4 +38,18 @@ pub trait SpectrumSource {
     fn spectrum_count_hint(&self) -> Option<usize> {
         None
     }
+
+    /// Extra PSI-MS `<processingMethod>` steps, beyond the writer's own
+    /// default "Conversion to mzML" step, that belong in the emitted
+    /// `<dataProcessingList>`. Each entry is a `(accession, name)` CV term
+    /// pair, in the order they should be recorded.
+    ///
+    /// Defaults to none. Adapters that transform spectra in a way a
+    /// consumer needs recorded in the file's processing history (e.g.
+    /// [`Centroided`](crate::Centroided) doing peak picking) override this,
+    /// delegating to the wrapped source first so steps accumulate through a
+    /// chain of adapters.
+    fn additional_processing_steps(&self) -> Vec<(&'static str, &'static str)> {
+        Vec::new()
+    }
 }
