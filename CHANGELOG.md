@@ -21,6 +21,39 @@ crate adheres to [Semantic Versioning](https://semver.org/).
   output needed no code change since it already hashes the bytes actually
   written, whichever codec produced them. Numpress support is left as a
   follow-up. Contributed by @Nabejo (closes #8).
+- Unit tests for the hand-rolled SHA-1 implementation backing indexed
+  mzML's `<fileChecksum>` (`src/mzml.rs`), checked against NIST/FIPS
+  180-1 test vectors and message lengths chosen to exercise the
+  padding-block boundaries (empty, 56, 64, and 1000 bytes), plus a
+  streaming-vs-single-shot equivalence check. Also adds an integration
+  test that generates a small indexed-mzML document, recomputes its
+  checksum with a second, independent SHA-1 implementation, and asserts
+  it matches the embedded `fileChecksum`. Previously nothing in the
+  crate would have caught a future refactor silently breaking the hash
+  (contributed by @Nabejo, closes #11).
+- `RunMetadata::acquisition_software_name` and
+  `RunMetadata::acquisition_software_version`, both `Option<String>`,
+  carrying the name/version of the original vendor acquisition software
+  that recorded a run (Xcalibur, MassHunter, Analyst, LabSolutions, etc).
+  This is distinct from the existing `software_name`/`software_version`
+  fields, which identify the vendor-reader crate producing the mzML, not
+  the instrument-control software that acquired the data. `softwareList`
+  previously hardcoded a single `<software>` entry for the reader itself,
+  so this provenance was dropped even where a vendor reader's own
+  instrument-method metadata already exposes it - msconvert-produced
+  files preserve it, ours did not. The writer now emits a second
+  `<software>` entry (fixed id `acquisition_software`, since an
+  arbitrary vendor-reported name may contain characters, such as a
+  space, that are not valid in an XML `xs:ID`) when
+  `acquisition_software_name` is present, using the same generic
+  `MS:1000799` ("custom unreleased software tool") cvParam already used
+  for the reader's own entry; mapping specific vendor names to their own
+  PSI-MS CV term is left for a follow-up; each vendor string would need
+  to be checked against the CV rather than guessed. Adding these fields
+  is a source-breaking change for any code that constructs a
+  `RunMetadata` literal - existing vendor crates need two lines added
+  (both may default to `None`) at their `RunMetadata` construction
+  site(s) (closes #10, contributed by @Nabejo).
 
 ## [1.3.0] - 2026-07-24
 

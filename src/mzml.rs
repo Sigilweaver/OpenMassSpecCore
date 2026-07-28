@@ -1092,6 +1092,8 @@ mod tests {
                 native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
                 instrument: CvTerm::new("MS:1001911", "Q Exactive"),
                 instrument_serial_number: self.instrument_serial_number.clone(),
+                acquisition_software_name: None,
+                acquisition_software_version: None,
                 software_name: "toy".into(),
                 software_version: "0.0.0".into(),
                 start_timestamp: self.start_timestamp.clone(),
@@ -1535,5 +1537,80 @@ mod tests {
         let hex = &s[checksum_start..checksum_end];
         assert_eq!(hex.len(), 40, "SHA-1 hex digest must be 40 chars");
         assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ---------- Sha1 test vectors (issue #11) -------------------------------
+    //
+    // The hand-rolled SHA-1 above had no regression protection: nothing in
+    // the crate would catch a future refactor silently breaking it. These
+    // vectors are checked against a well-established independent
+    // implementation (Python's `hashlib`), not against this module's own
+    // output, so they actually catch a broken implementation rather than
+    // just re-confirming it.
+
+    fn sha1_hex(data: &[u8]) -> String {
+        let mut h = Sha1::new();
+        h.update(data);
+        h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    #[test]
+    fn sha1_matches_nist_fips_180_1_vectors() {
+        // FIPS 180-1 / RFC 3174 sample vectors.
+        assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            sha1_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
+        );
+        let million_a = vec![b'a'; 1_000_000];
+        assert_eq!(
+            sha1_hex(&million_a),
+            "34aa973cd4c4daa4f61eeb2bdbad27316534016f"
+        );
+    }
+
+    #[test]
+    fn sha1_handles_padding_block_boundaries() {
+        // Empty input.
+        assert_eq!(sha1_hex(b""), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+
+        // 56 bytes: one byte short of the 64-byte block size, so the 0x80
+        // pad byte plus the 8-byte length field must roll over into a
+        // second block.
+        let msg56: Vec<u8> = (0..56u8).map(|i| b'a' + (i % 26)).collect();
+        assert_eq!(sha1_hex(&msg56), "4ad5bb7ae3c4024768d364b77c52128ea3cffebe");
+
+        // 64 bytes: exactly one full block, so padding alone must fill an
+        // entire second block.
+        let msg64: Vec<u8> = (0..64u8).map(|i| b'a' + (i % 26)).collect();
+        assert_eq!(sha1_hex(&msg64), "93249d4c2f8903ebf41ac358473148ae6ddd7042");
+
+        // 1000 bytes: spans several full blocks plus a partial final block.
+        let msg1000: Vec<u8> = (0..1000u32).map(|i| (i % 256) as u8).collect();
+        assert_eq!(
+            sha1_hex(&msg1000),
+            "af0b191c2de46fe13fe0908f5a6a4e90e0cafc46"
+        );
+    }
+
+    #[test]
+    fn sha1_streaming_updates_match_single_shot() {
+        // CountingWriter feeds Sha1::update() once per `write` call, so the
+        // chunk boundaries seen in practice rarely line up with the
+        // internal 64-byte block size. Confirm chunking doesn't change the
+        // digest.
+        let data: Vec<u8> = (0..200u32).map(|i| (i % 256) as u8).collect();
+
+        let mut whole = Sha1::new();
+        whole.update(&data);
+        let whole_digest = whole.finalize();
+
+        let mut chunked = Sha1::new();
+        for chunk in data.chunks(7) {
+            chunked.update(chunk);
+        }
+        let chunked_digest = chunked.finalize();
+
+        assert_eq!(whole_digest, chunked_digest);
     }
 }

@@ -34,6 +34,11 @@ impl SampleSource {
             instrument_serial_number: Some("SN-EXAMPLE-001".into()),
             software_name: "openmassspec-core-sample".into(),
             software_version: env!("CARGO_PKG_VERSION").into(),
+            // Exercises the second `<software>` entry / `<softwareList
+            // count="2">` path so it is schema-checked without a vendor
+            // file.
+            acquisition_software_name: Some("Xcalibur".into()),
+            acquisition_software_version: Some("4.4.16.14".into()),
             // Exercises the `startTimeStamp` attribute path so it is
             // schema-checked without a vendor file.
             start_timestamp: Some("2026-06-01T14:30:00Z".into()),
