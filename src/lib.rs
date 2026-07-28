@@ -7,10 +7,12 @@
 //!   [`SpectrumRecord`], [`PrecursorInfo`], [`ChromatogramRecord`],
 //!   [`RunMetadata`], [`CvTerm`].
 //! * Shared enums: [`Polarity`], [`ScanMode`], [`Analyzer`], [`MsPower`],
-//!   [`Activation`].
+//!   [`Activation`], [`Compression`].
 //! * A trait every vendor parser implements: [`SpectrumSource`].
 //! * One canonical mzML 1.1.0 writer: [`write_mzml`] and
-//!   [`write_indexed_mzml`].
+//!   [`write_indexed_mzml`] (zlib-compressed binary data arrays by default;
+//!   [`write_mzml_with_compression`]/[`write_indexed_mzml_with_compression`]
+//!   for explicit codec control).
 //! * A streaming profile-to-centroid transform, [`Centroided`], that wraps
 //!   any `SpectrumSource`.
 //!
@@ -30,9 +32,14 @@ pub mod arrow;
 pub mod conformance;
 
 pub use centroid::Centroided;
-pub use enums::{Activation, Analyzer, MobilityArrayKind, MsPower, Polarity, ScanMode};
+pub use enums::{
+    Activation, Analyzer, Compression, MobilityArrayKind, MsPower, Polarity, ScanMode,
+};
 pub use error::{Error, Result};
-pub use mzml::{write_indexed_mzml, write_mzml};
+pub use mzml::{
+    write_indexed_mzml, write_indexed_mzml_with_compression, write_mzml,
+    write_mzml_with_compression,
+};
 pub use source::SpectrumSource;
 pub use types::{ChromatogramRecord, CvTerm, PrecursorInfo, RunMetadata, SpectrumRecord};
 

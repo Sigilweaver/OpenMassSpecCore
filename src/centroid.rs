@@ -181,6 +181,8 @@ mod tests {
                     instrument_serial_number: None,
                     software_name: "toy-writer".into(),
                     software_version: "0.0.0".into(),
+                    acquisition_software_name: None,
+                    acquisition_software_version: None,
                     start_timestamp: None,
                     mobility_array_kind: None,
                     analyzers: Vec::new(),

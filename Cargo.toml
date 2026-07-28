@@ -31,5 +31,10 @@ arrow-array = { version = "59", optional = true }
 arrow-schema = { version = "59", optional = true }
 arrow-buffer = { version = "59", optional = true }
 thiserror = "2"
+# Default features (`rust_backend`, i.e. miniz_oxide) are a pure-safe-Rust
+# zlib implementation with no C compiler / system zlib requirement, matching
+# this crate's `unsafe_code = "forbid"` posture and keeping CI portable
+# across the ubuntu/macos matrix.
+flate2 = "1"
 
 [dev-dependencies]

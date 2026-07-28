@@ -4,6 +4,13 @@
 //! variant that also writes the `<indexList>` + `<fileChecksum>` trailer so
 //! random-access mzML readers (pyteomics, pymzml, sciex-style indexers) work.
 //!
+//! Binary data arrays (`m/z`, intensity, and per-peak ion mobility, plus
+//! chromatogram time/intensity) are zlib-compressed (`MS:1000574`) by
+//! default, matching msconvert/OpenMS output; use
+//! [`write_mzml_with_compression`]/[`write_indexed_mzml_with_compression`]
+//! to opt back into the uncompressed (`MS:1000576`) layout the writer used
+//! before 1.4.
+//!
 //! The implementation here is the vendor-neutral lift of the writer that
 //! originally lived in `opentfraw::mzml`. All vendor-specific decisions (the
 //! source-file CV term, the native-ID format CV term, the instrument CV term,
@@ -13,7 +20,10 @@
 
 use std::io::{Result, Write};
 
-use crate::enums::{Activation, Analyzer, MobilityArrayKind, Polarity, ScanMode};
+use flate2::write::ZlibEncoder;
+use flate2::Compression as ZlibLevel;
+
+use crate::enums::{Activation, Analyzer, Compression, MobilityArrayKind, Polarity, ScanMode};
 use crate::source::SpectrumSource;
 use crate::types::{ChromatogramRecord, CvTerm, RunMetadata, SpectrumRecord};
 
@@ -168,14 +178,45 @@ fn base64_encode(data: &[u8]) -> String {
     String::from_utf8(out).expect("base64 output is ASCII")
 }
 
-fn encode_f64_array(vals: &[f64]) -> String {
-    let bytes: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
-    base64_encode(&bytes)
+// ---------- zlib (RFC 1950) + compression-aware array encoding ------------
+
+/// Compress `data` as a zlib stream. In-memory `Vec<u8>` I/O never fails, so
+/// the `expect`s here are infallible in practice.
+fn zlib_compress(data: &[u8]) -> Vec<u8> {
+    let mut enc = ZlibEncoder::new(Vec::new(), ZlibLevel::default());
+    enc.write_all(data)
+        .expect("in-memory zlib compression cannot fail");
+    enc.finish()
+        .expect("in-memory zlib compression cannot fail")
 }
 
-fn encode_f32_array(vals: &[f32]) -> String {
+/// The `MS:1000574`/`MS:1000576` cvParam accession + name pair for a
+/// `<binaryDataArray>`, matching whatever bytes [`encode_bytes`] wrote.
+fn compression_cv(compression: Compression) -> (&'static str, &'static str) {
+    match compression {
+        Compression::NoCompression => ("MS:1000576", "no compression"),
+        Compression::Zlib => ("MS:1000574", "zlib compression"),
+    }
+}
+
+/// Base64-encode `data`, zlib-compressing it first when `compression`
+/// requests it. Pair with [`compression_cv`] so the emitted cvParam always
+/// matches the bytes actually written.
+fn encode_bytes(data: &[u8], compression: Compression) -> String {
+    match compression {
+        Compression::NoCompression => base64_encode(data),
+        Compression::Zlib => base64_encode(&zlib_compress(data)),
+    }
+}
+
+fn encode_f64_array(vals: &[f64], compression: Compression) -> String {
     let bytes: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
-    base64_encode(&bytes)
+    encode_bytes(&bytes, compression)
+}
+
+fn encode_f32_array(vals: &[f32], compression: Compression) -> String {
+    let bytes: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+    encode_bytes(&bytes, compression)
 }
 
 fn escape(s: &str) -> String {
@@ -209,8 +250,20 @@ fn activation_cv(act: Activation, analyzer: Option<Analyzer>) -> (&'static str, 
 
 // ---------- public entry points --------------------------------------------
 
-/// Write the source's spectra as mzML 1.1.0 (un-indexed).
+/// Write the source's spectra as mzML 1.1.0 (un-indexed), zlib-compressing
+/// binary data arrays (`MS:1000574`). Use [`write_mzml_with_compression`] to
+/// choose a different codec.
 pub fn write_mzml<S: SpectrumSource + ?Sized, W: Write>(src: &mut S, out: &mut W) -> Result<()> {
+    write_mzml_with_compression(src, out, Compression::default())
+}
+
+/// Write the source's spectra as mzML 1.1.0 (un-indexed), with an explicit
+/// choice of binary-data-array [`Compression`].
+pub fn write_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>(
+    src: &mut S,
+    out: &mut W,
+    compression: Compression,
+) -> Result<()> {
     let meta = src.run_metadata();
     let count = src.spectrum_count_hint().unwrap_or(0);
     let mobility_kind = meta.mobility_array_kind;
@@ -219,7 +272,7 @@ pub fn write_mzml<S: SpectrumSource + ?Sized, W: Write>(src: &mut S, out: &mut W
 
     write_prologue(out, &meta, count, false, &extra_processing)?;
     for rec in src.iter_spectra() {
-        write_spectrum(out, &rec, mobility_kind, &analyzer_ic_ids)?;
+        write_spectrum(out, &rec, mobility_kind, &analyzer_ic_ids, compression)?;
     }
     writeln!(out, r#"    </spectrumList>"#)?;
 
@@ -231,7 +284,7 @@ pub fn write_mzml<S: SpectrumSource + ?Sized, W: Write>(src: &mut S, out: &mut W
             chroms.len()
         )?;
         for rec in &chroms {
-            write_chromatogram(out, rec)?;
+            write_chromatogram(out, rec, compression)?;
         }
         writeln!(out, r#"    </chromatogramList>"#)?;
     }
@@ -242,10 +295,27 @@ pub fn write_mzml<S: SpectrumSource + ?Sized, W: Write>(src: &mut S, out: &mut W
 }
 
 /// Write the source's spectra as indexed mzML 1.1.0 (with `<indexList>` and
-/// `<fileChecksum>` trailer).
+/// `<fileChecksum>` trailer), zlib-compressing binary data arrays
+/// (`MS:1000574`). Use [`write_indexed_mzml_with_compression`] to choose a
+/// different codec.
 pub fn write_indexed_mzml<S: SpectrumSource + ?Sized, W: Write>(
     src: &mut S,
     out: &mut W,
+) -> Result<()> {
+    write_indexed_mzml_with_compression(src, out, Compression::default())
+}
+
+/// Write the source's spectra as indexed mzML 1.1.0 (with `<indexList>` and
+/// `<fileChecksum>` trailer), with an explicit choice of binary-data-array
+/// [`Compression`].
+///
+/// The `<fileChecksum>` SHA-1 is computed over the bytes actually written to
+/// `out` (via the internal counting/hashing writer), so it covers whichever
+/// codec produced the `<binary>` payloads with no separate handling needed.
+pub fn write_indexed_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>(
+    src: &mut S,
+    out: &mut W,
+    compression: Compression,
 ) -> Result<()> {
     let meta = src.run_metadata();
     let count = src.spectrum_count_hint().unwrap_or(0);
@@ -259,7 +329,7 @@ pub fn write_indexed_mzml<S: SpectrumSource + ?Sized, W: Write>(
     let mut offsets: Vec<(String, u64)> = Vec::with_capacity(count);
     for rec in src.iter_spectra() {
         offsets.push((rec.native_id.clone(), cw.pos));
-        write_spectrum(&mut cw, &rec, mobility_kind, &analyzer_ic_ids)?;
+        write_spectrum(&mut cw, &rec, mobility_kind, &analyzer_ic_ids, compression)?;
     }
 
     writeln!(cw, r#"    </spectrumList>"#)?;
@@ -274,7 +344,7 @@ pub fn write_indexed_mzml<S: SpectrumSource + ?Sized, W: Write>(
         )?;
         for rec in &chroms {
             chrom_offsets.push((rec.id.clone(), cw.pos));
-            write_chromatogram(&mut cw, rec)?;
+            write_chromatogram(&mut cw, rec, compression)?;
         }
         writeln!(cw, r#"    </chromatogramList>"#)?;
     }
@@ -533,6 +603,7 @@ fn write_spectrum<W: Write>(
     rec: &SpectrumRecord,
     mobility_kind: Option<MobilityArrayKind>,
     analyzer_ic_ids: &[(Analyzer, String)],
+    compression: Compression,
 ) -> Result<()> {
     let spectrum_type = if rec.ms_level <= 1 {
         ("MS:1000579", "MS1 spectrum")
@@ -790,13 +861,14 @@ fn write_spectrum<W: Write>(
     }
 
     if n_peaks > 0 {
-        let mz_b64 = encode_f64_array(&rec.mz);
-        let int_b64 = encode_f32_array(&rec.intensity);
+        let (compression_acc, compression_name) = compression_cv(compression);
+        let mz_b64 = encode_f64_array(&rec.mz, compression);
+        let int_b64 = encode_f32_array(&rec.intensity, compression);
         let mobility_b64_opt = rec
             .inv_mobility_per_peak
             .as_ref()
             .filter(|v| v.len() == n_peaks)
-            .map(|v| encode_f32_array(v));
+            .map(|v| encode_f32_array(v, compression));
         let array_count = 2 + usize::from(mobility_b64_opt.is_some());
 
         writeln!(
@@ -819,7 +891,7 @@ fn write_spectrum<W: Write>(
         )?;
         writeln!(
             out,
-            r#"            <cvParam cvRef="MS" accession="MS:1000576" name="no compression" value=""/>"#
+            r#"            <cvParam cvRef="MS" accession="{compression_acc}" name="{compression_name}" value=""/>"#
         )?;
         writeln!(out, r#"            <binary>{mz_b64}</binary>"#)?;
         writeln!(out, r#"          </binaryDataArray>"#)?;
@@ -839,7 +911,7 @@ fn write_spectrum<W: Write>(
         )?;
         writeln!(
             out,
-            r#"            <cvParam cvRef="MS" accession="MS:1000576" name="no compression" value=""/>"#
+            r#"            <cvParam cvRef="MS" accession="{compression_acc}" name="{compression_name}" value=""/>"#
         )?;
         writeln!(out, r#"            <binary>{int_b64}</binary>"#)?;
         writeln!(out, r#"          </binaryDataArray>"#)?;
@@ -876,7 +948,7 @@ fn write_spectrum<W: Write>(
             )?;
             writeln!(
                 out,
-                r#"            <cvParam cvRef="MS" accession="MS:1000576" name="no compression" value=""/>"#
+                r#"            <cvParam cvRef="MS" accession="{compression_acc}" name="{compression_name}" value=""/>"#
             )?;
             writeln!(out, r#"            <binary>{mobility_b64}</binary>"#)?;
             writeln!(out, r#"          </binaryDataArray>"#)?;
@@ -889,7 +961,11 @@ fn write_spectrum<W: Write>(
     Ok(())
 }
 
-fn write_chromatogram<W: Write>(out: &mut W, rec: &ChromatogramRecord) -> Result<()> {
+fn write_chromatogram<W: Write>(
+    out: &mut W,
+    rec: &ChromatogramRecord,
+    compression: Compression,
+) -> Result<()> {
     let n = rec.time_sec.len();
 
     writeln!(
@@ -942,8 +1018,9 @@ fn write_chromatogram<W: Write>(out: &mut W, rec: &ChromatogramRecord) -> Result
     // mzML stores time arrays in minutes by convention, matching scan start
     // time; `time_sec` is stored in seconds per `ChromatogramRecord`'s docs.
     let time_min: Vec<f32> = rec.time_sec.iter().map(|&t| t / 60.0).collect();
-    let time_b64 = encode_f32_array(&time_min);
-    let int_b64 = encode_f32_array(&rec.intensity);
+    let (compression_acc, compression_name) = compression_cv(compression);
+    let time_b64 = encode_f32_array(&time_min, compression);
+    let int_b64 = encode_f32_array(&rec.intensity, compression);
 
     writeln!(out, r#"        <binaryDataArrayList count="2">"#)?;
 
@@ -962,7 +1039,7 @@ fn write_chromatogram<W: Write>(out: &mut W, rec: &ChromatogramRecord) -> Result
     )?;
     writeln!(
         out,
-        r#"            <cvParam cvRef="MS" accession="MS:1000576" name="no compression" value=""/>"#
+        r#"            <cvParam cvRef="MS" accession="{compression_acc}" name="{compression_name}" value=""/>"#
     )?;
     writeln!(out, r#"            <binary>{time_b64}</binary>"#)?;
     writeln!(out, r#"          </binaryDataArray>"#)?;
@@ -982,7 +1059,7 @@ fn write_chromatogram<W: Write>(out: &mut W, rec: &ChromatogramRecord) -> Result
     )?;
     writeln!(
         out,
-        r#"            <cvParam cvRef="MS" accession="MS:1000576" name="no compression" value=""/>"#
+        r#"            <cvParam cvRef="MS" accession="{compression_acc}" name="{compression_name}" value=""/>"#
     )?;
     writeln!(out, r#"            <binary>{int_b64}</binary>"#)?;
     writeln!(out, r#"          </binaryDataArray>"#)?;
@@ -1037,6 +1114,8 @@ mod tests {
                 native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
                 instrument: CvTerm::new("MS:1001911", "Q Exactive"),
                 instrument_serial_number: self.instrument_serial_number.clone(),
+                acquisition_software_name: None,
+                acquisition_software_version: None,
                 software_name: "toy".into(),
                 software_version: "0.0.0".into(),
                 start_timestamp: self.start_timestamp.clone(),
@@ -1364,5 +1443,233 @@ mod tests {
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains(r#"<indexList count="1">"#));
         assert!(!s.contains(r#"<index name="chromatogram">"#));
+    }
+
+    // ---------- compression (issue #8) --------------------------------
+
+    #[test]
+    fn compression_cv_selects_matching_accession() {
+        assert_eq!(
+            compression_cv(Compression::NoCompression),
+            ("MS:1000576", "no compression")
+        );
+        assert_eq!(
+            compression_cv(Compression::Zlib),
+            ("MS:1000574", "zlib compression")
+        );
+    }
+
+    #[test]
+    fn zlib_compress_round_trips() {
+        use std::io::Read;
+        let original = b"the quick brown fox jumps over the lazy dog, repeated: \
+                          the quick brown fox jumps over the lazy dog";
+        let compressed = zlib_compress(original);
+        assert!(
+            compressed.len() < original.len(),
+            "zlib should shrink a repetitive payload"
+        );
+        let mut decoder = flate2::read::ZlibDecoder::new(&compressed[..]);
+        let mut round_tripped = Vec::new();
+        decoder.read_to_end(&mut round_tripped).unwrap();
+        assert_eq!(round_tripped, original);
+    }
+
+    #[test]
+    fn default_writer_emits_zlib_compression_not_no_compression() {
+        let mut src = ToySource::new();
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"accession="MS:1000574" name="zlib compression""#));
+        assert!(!s.contains("MS:1000576"));
+    }
+
+    #[test]
+    fn indexed_default_writer_also_emits_zlib_compression() {
+        let mut src = ToySource::new();
+        let mut buf = Vec::new();
+        write_indexed_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"accession="MS:1000574" name="zlib compression""#));
+        assert!(!s.contains("MS:1000576"));
+    }
+
+    #[test]
+    fn explicit_no_compression_matches_pre_1_4_layout() {
+        let mut src = ToySource::new();
+        let mut buf = Vec::new();
+        write_mzml_with_compression(&mut src, &mut buf, Compression::NoCompression).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"accession="MS:1000576" name="no compression""#));
+        assert!(!s.contains("MS:1000574"));
+        // The single toy spectrum has mz = [100.0]; with no compression the
+        // <binary> payload is exactly the un-compressed base64 of its 8
+        // little-endian bytes, matching the writer's pre-1.4 output.
+        let expected = base64_encode(&100.0f64.to_le_bytes());
+        assert!(s.contains(&format!("<binary>{expected}</binary>")));
+    }
+
+    /// Extracts the text between the first `<binary>...</binary>` pair in
+    /// `xml`, matching the m/z array (always the first `binaryDataArray` the
+    /// writer emits for a non-empty spectrum).
+    fn first_binary_payload(xml: &str) -> &str {
+        let start = xml.find("<binary>").expect("no <binary> element") + "<binary>".len();
+        let end = xml[start..]
+            .find("</binary>")
+            .expect("unterminated <binary>")
+            + start;
+        &xml[start..end]
+    }
+
+    /// Minimal RFC 4648 base64 decoder, the inverse of this module's
+    /// `base64_encode`, scoped to tests so round-trip assertions don't need
+    /// an extra dependency.
+    fn base64_decode(s: &str) -> Vec<u8> {
+        fn val(c: u8) -> u8 {
+            match c {
+                b'A'..=b'Z' => c - b'A',
+                b'a'..=b'z' => c - b'a' + 26,
+                b'0'..=b'9' => c - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => 0,
+            }
+        }
+        let bytes: Vec<u8> = s.bytes().filter(|&b| b != b'=').collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            let n = (bytes.len() - i).min(4);
+            let mut chunk = [0u8; 4];
+            chunk[..n].copy_from_slice(&bytes[i..i + n]);
+            let b = ((val(chunk[0]) as u32) << 18)
+                | ((val(chunk[1]) as u32) << 12)
+                | ((val(chunk[2]) as u32) << 6)
+                | (val(chunk[3]) as u32);
+            if n > 1 {
+                out.push((b >> 16) as u8);
+            }
+            if n > 2 {
+                out.push((b >> 8) as u8);
+            }
+            if n > 3 {
+                out.push(b as u8);
+            }
+            i += 4;
+        }
+        out
+    }
+
+    #[test]
+    fn zlib_binary_payload_decodes_back_to_original_mz_array() {
+        use std::io::Read;
+        let mut src = ToySource::new();
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+
+        let payload = first_binary_payload(&s);
+        let compressed = base64_decode(payload);
+        let mut decoder = flate2::read::ZlibDecoder::new(&compressed[..]);
+        let mut raw = Vec::new();
+        decoder.read_to_end(&mut raw).unwrap();
+
+        // ToySource's single spectrum carries mz = [100.0] (see
+        // `minimal_spectrum`), encoded little-endian as f64.
+        assert_eq!(raw, 100.0f64.to_le_bytes());
+    }
+
+    #[test]
+    fn indexed_zlib_checksum_still_present_and_well_formed() {
+        let mut src = ToySource::new();
+        let mut buf = Vec::new();
+        write_indexed_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        // fileChecksum is hashed over whatever bytes actually got written
+        // (see write_indexed_mzml_with_compression's doc comment), so the
+        // trailer shape doesn't change with the codec - only the byte
+        // count feeding the hash does.
+        assert!(s.contains("<indexListOffset>"));
+        let checksum_start = s.find("<fileChecksum>").unwrap() + "<fileChecksum>".len();
+        let checksum_end = s.find("</fileChecksum>").unwrap();
+        let hex = &s[checksum_start..checksum_end];
+        assert_eq!(hex.len(), 40, "SHA-1 hex digest must be 40 chars");
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ---------- Sha1 test vectors (issue #11) -------------------------------
+    //
+    // The hand-rolled SHA-1 above had no regression protection: nothing in
+    // the crate would catch a future refactor silently breaking it. These
+    // vectors are checked against a well-established independent
+    // implementation (Python's `hashlib`), not against this module's own
+    // output, so they actually catch a broken implementation rather than
+    // just re-confirming it.
+
+    fn sha1_hex(data: &[u8]) -> String {
+        let mut h = Sha1::new();
+        h.update(data);
+        h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    #[test]
+    fn sha1_matches_nist_fips_180_1_vectors() {
+        // FIPS 180-1 / RFC 3174 sample vectors.
+        assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            sha1_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
+        );
+        let million_a = vec![b'a'; 1_000_000];
+        assert_eq!(
+            sha1_hex(&million_a),
+            "34aa973cd4c4daa4f61eeb2bdbad27316534016f"
+        );
+    }
+
+    #[test]
+    fn sha1_handles_padding_block_boundaries() {
+        // Empty input.
+        assert_eq!(sha1_hex(b""), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+
+        // 56 bytes: one byte short of the 64-byte block size, so the 0x80
+        // pad byte plus the 8-byte length field must roll over into a
+        // second block.
+        let msg56: Vec<u8> = (0..56u8).map(|i| b'a' + (i % 26)).collect();
+        assert_eq!(sha1_hex(&msg56), "4ad5bb7ae3c4024768d364b77c52128ea3cffebe");
+
+        // 64 bytes: exactly one full block, so padding alone must fill an
+        // entire second block.
+        let msg64: Vec<u8> = (0..64u8).map(|i| b'a' + (i % 26)).collect();
+        assert_eq!(sha1_hex(&msg64), "93249d4c2f8903ebf41ac358473148ae6ddd7042");
+
+        // 1000 bytes: spans several full blocks plus a partial final block.
+        let msg1000: Vec<u8> = (0..1000u32).map(|i| (i % 256) as u8).collect();
+        assert_eq!(
+            sha1_hex(&msg1000),
+            "af0b191c2de46fe13fe0908f5a6a4e90e0cafc46"
+        );
+    }
+
+    #[test]
+    fn sha1_streaming_updates_match_single_shot() {
+        // CountingWriter feeds Sha1::update() once per `write` call, so the
+        // chunk boundaries seen in practice rarely line up with the
+        // internal 64-byte block size. Confirm chunking doesn't change the
+        // digest.
+        let data: Vec<u8> = (0..200u32).map(|i| (i % 256) as u8).collect();
+
+        let mut whole = Sha1::new();
+        whole.update(&data);
+        let whole_digest = whole.finalize();
+
+        let mut chunked = Sha1::new();
+        for chunk in data.chunks(7) {
+            chunked.update(chunk);
+        }
+        let chunked_digest = chunked.finalize();
+
+        assert_eq!(whole_digest, chunked_digest);
     }
 }
