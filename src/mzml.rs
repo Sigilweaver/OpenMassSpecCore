@@ -644,21 +644,6 @@ fn write_spectrum<W: Write>(
         spectrum_type.0, spectrum_type.1
     )?;
 
-    if let Some(event_id) = rec.acquisition_event_id {
-        writeln!(
-            out,
-            r#"        <userParam name="acquisition event id" value="{event_id}"/>"#
-        )?;
-    }
-    for (name, value) in &rec.extra {
-        writeln!(
-            out,
-            r#"        <userParam name="{}" value="{}"/>"#,
-            escape(name),
-            escape(value)
-        )?;
-    }
-
     match rec.scan_mode {
         Some(ScanMode::Centroid) => writeln!(
             out,
@@ -711,6 +696,21 @@ fn write_spectrum<W: Write>(
         r#"        <cvParam cvRef="MS" accession="MS:1000527" name="highest observed m/z" value="{:.6}"/>"#,
         hi_mz
     )?;
+
+    if let Some(event_id) = rec.acquisition_event_id {
+        writeln!(
+            out,
+            r#"        <userParam name="acquisition event id" value="{event_id}"/>"#
+        )?;
+    }
+    for (name, value) in &rec.extra {
+        writeln!(
+            out,
+            r#"        <userParam name="{}" value="{}"/>"#,
+            escape(name),
+            escape(value)
+        )?;
+    }
 
     writeln!(out, r#"        <scanList count="1">"#)?;
     writeln!(
@@ -1643,6 +1643,28 @@ mod tests {
         assert!(xml.contains(r#"<userParam name="openwraw.source_type" value="ESI &amp; APCI"/>"#));
         assert!(xml.contains(r#"<userParam name="acquisition event id" value="42"/>"#));
         assert!(xml.contains(r#"<userParam name="openszraw.segment" value="A &lt; B"/>"#));
+
+        let run_extra = xml
+            .find(r#"<userParam name="openwraw.source_type""#)
+            .unwrap();
+        let spectrum_list = xml.find("<spectrumList ").unwrap();
+        assert!(run_extra < spectrum_list);
+
+        let spectrum_start = xml.find("<spectrum ").unwrap();
+        let spectrum_xml = &xml[spectrum_start..];
+        let last_spectrum_cv = spectrum_xml
+            .find(r#"<cvParam cvRef="MS" accession="MS:1000527""#)
+            .unwrap();
+        let event_id = spectrum_xml
+            .find(r#"<userParam name="acquisition event id""#)
+            .unwrap();
+        let spectrum_extra = spectrum_xml
+            .find(r#"<userParam name="openszraw.segment""#)
+            .unwrap();
+        let scan_list = spectrum_xml.find("<scanList ").unwrap();
+        assert!(last_spectrum_cv < event_id);
+        assert!(event_id < spectrum_extra);
+        assert!(spectrum_extra < scan_list);
     }
 
     // ---------- Sha1 test vectors (issue #11) -------------------------------
