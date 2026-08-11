@@ -48,6 +48,10 @@ impl SampleSource {
             // and the TOFMS one gets another, so it is schema-checked without
             // a vendor file.
             analyzers: vec![Analyzer::FTMS, Analyzer::TOFMS],
+            extra: std::collections::BTreeMap::from([(
+                "openmassspec.sample_source".into(),
+                "synthetic".into(),
+            )]),
         };
         let ms1 = SpectrumRecord {
             index: 0,
@@ -57,6 +61,7 @@ impl SampleSource {
             polarity: Some(Polarity::Positive),
             scan_mode: Some(ScanMode::Centroid),
             analyzer: Some(Analyzer::FTMS),
+            acquisition_event_id: Some(1),
             filter: Some("FTMS + p ESI Full ms".into()),
             retention_time_sec: 0.123 * 60.0,
             total_ion_current: None,
@@ -71,6 +76,10 @@ impl SampleSource {
             mz: vec![100.0, 200.0, 300.0],
             intensity: vec![1.0, 5.0, 2.0],
             inv_mobility_per_peak: None,
+            extra: std::collections::BTreeMap::from([(
+                "openmassspec.sample_label".into(),
+                "survey".into(),
+            )]),
         };
         let ms2 = SpectrumRecord {
             index: 1,
@@ -80,6 +89,7 @@ impl SampleSource {
             polarity: Some(Polarity::Positive),
             scan_mode: Some(ScanMode::Centroid),
             analyzer: Some(Analyzer::FTMS),
+            acquisition_event_id: None,
             filter: Some("FTMS + p ESI d Full ms2 200.00@hcd28.00".into()),
             retention_time_sec: 0.5 * 60.0,
             total_ion_current: Some(123.45),
@@ -108,6 +118,7 @@ impl SampleSource {
             mz: vec![150.5, 160.0],
             intensity: vec![99.0, 50.0],
             inv_mobility_per_peak: None,
+            extra: Default::default(),
         };
         // A frame-collapsed ion-mobility MS1 (the Bruker timsTOF shape):
         // scalar 1/K0 plus a per-peak inverse-reduced-mobility array, which
@@ -121,6 +132,7 @@ impl SampleSource {
             polarity: Some(Polarity::Positive),
             scan_mode: Some(ScanMode::Centroid),
             analyzer: Some(Analyzer::TOFMS),
+            acquisition_event_id: None,
             filter: None,
             retention_time_sec: 0.75 * 60.0,
             total_ion_current: None,
@@ -135,6 +147,7 @@ impl SampleSource {
             mz: vec![120.0, 240.0, 360.0],
             intensity: vec![3.0, 7.0, 4.0],
             inv_mobility_per_peak: Some(vec![0.92, 0.95, 0.98]),
+            extra: Default::default(),
         };
         // A TIC and a SRM/MRM transition chromatogram. Exercises the
         // `chromatogramList` path (plain + indexed) so it is schema-checked

@@ -324,6 +324,7 @@ mod tests {
                 start_timestamp: None,
                 mobility_array_kind: None,
                 analyzers: Vec::new(),
+                extra: Default::default(),
             }
         }
         fn iter_spectra<'a>(&'a mut self) -> Box<dyn Iterator<Item = SpectrumRecord> + 'a> {
@@ -342,6 +343,7 @@ mod tests {
             polarity: Some(Polarity::Positive),
             scan_mode: None,
             analyzer: None,
+            acquisition_event_id: None,
             filter: None,
             retention_time_sec: rt,
             total_ion_current: Some(30.0),
@@ -363,6 +365,7 @@ mod tests {
             mz,
             intensity,
             inv_mobility_per_peak: None,
+            extra: Default::default(),
         }
     }
 

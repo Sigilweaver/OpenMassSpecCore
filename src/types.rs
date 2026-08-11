@@ -8,15 +8,39 @@
 //! it.
 
 use crate::enums::{Activation, Analyzer, MobilityArrayKind, Polarity, ScanMode};
+use std::collections::BTreeMap;
 
 /// A PSI-MS controlled-vocabulary term.
 ///
 /// `accession` is a stable identifier (`MS:NNNNNNN` or `UO:NNNNNNN`); `name`
 /// is the human-readable term. mzML output writes these verbatim.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CvTerm {
     pub accession: &'static str,
     pub name: String,
+}
+
+impl<'de> serde::Deserialize<'de> for CvTerm {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct OwnedCvTerm {
+            accession: String,
+            name: String,
+        }
+
+        let value = OwnedCvTerm::deserialize(deserializer)?;
+        Ok(Self {
+            accession: intern_accession(value.accession),
+            name: value.name,
+        })
+    }
+}
+
+fn intern_accession(value: String) -> &'static str {
+    Box::leak(value.into_boxed_str())
 }
 
 impl CvTerm {
@@ -29,7 +53,7 @@ impl CvTerm {
 }
 
 /// Precursor metadata for an MS2+ spectrum.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PrecursorInfo {
     /// Isolation-window center m/z (target).
     pub target_mz: Option<f64>,
@@ -70,7 +94,7 @@ pub struct PrecursorInfo {
 /// `64-bit float` / `32-bit float` defaults are and what every downstream
 /// search engine expects. Vendors that decode lower-precision arrays should
 /// widen to these types.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpectrumRecord {
     /// Zero-based position in the source file (used as mzML `index=`).
     pub index: usize,
@@ -86,6 +110,10 @@ pub struct SpectrumRecord {
     pub polarity: Option<Polarity>,
     pub scan_mode: Option<ScanMode>,
     pub analyzer: Option<Analyzer>,
+    /// Numeric acquisition-event or grouping identifier decoded from the
+    /// source file, when available.
+    #[serde(default)]
+    pub acquisition_event_id: Option<u32>,
     /// Thermo-style scan filter (or vendor-equivalent). Optional; populated
     /// by parsers that have a meaningful filter string.
     pub filter: Option<String>,
@@ -119,6 +147,9 @@ pub struct SpectrumRecord {
     /// when an IMS-resolved parser opts to preserve it. Length must equal
     /// `mz.len()` when present.
     pub inv_mobility_per_peak: Option<Vec<f32>>,
+    /// Namespaced reader-specific values. Keys use `<reader>.<field>`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, String>,
 }
 
 impl SpectrumRecord {
@@ -184,7 +215,7 @@ pub struct ChromatogramRecord {
 /// Vendors construct this once per file. The mzML writer uses it to populate
 /// `<fileDescription>`, `<sourceFileList>`, `<instrumentConfigurationList>`
 /// and `<softwareList>`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RunMetadata {
     /// The source file name to put in `<sourceFile name="...">`. Typically
     /// `Path::file_name()`; for directory-based formats (Bruker `.d/`,
@@ -236,4 +267,86 @@ pub struct RunMetadata {
     /// a Fusion) preserve per-scan analyzer identity. Leave empty to keep
     /// the previous single-`IC1`-for-everything behavior.
     pub analyzers: Vec<Analyzer>,
+    /// Namespaced reader-specific values. Keys use `<reader>.<field>`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spectrum() -> SpectrumRecord {
+        SpectrumRecord {
+            index: 0,
+            scan_number: 1,
+            native_id: "scan=1".into(),
+            ms_level: 1,
+            polarity: Some(Polarity::Positive),
+            scan_mode: Some(ScanMode::Centroid),
+            analyzer: Some(Analyzer::TOFMS),
+            acquisition_event_id: Some(17),
+            filter: None,
+            retention_time_sec: 1.5,
+            total_ion_current: None,
+            base_peak_mz: None,
+            base_peak_intensity: None,
+            low_mz: None,
+            high_mz: None,
+            ion_injection_time_ms: None,
+            inv_mobility: None,
+            faims_cv: None,
+            precursor: None,
+            mz: vec![100.0],
+            intensity: vec![12.0],
+            inv_mobility_per_peak: None,
+            extra: BTreeMap::from([("openszraw.event_label".into(), "survey".into())]),
+        }
+    }
+
+    fn run_metadata() -> RunMetadata {
+        RunMetadata {
+            source_file_name: "test.raw".into(),
+            source_file_format: CvTerm::new("MS:1000563", "Thermo RAW format"),
+            native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
+            instrument: CvTerm::new("MS:1001911", "Q Exactive"),
+            instrument_serial_number: None,
+            software_name: "test-reader".into(),
+            software_version: "1.0".into(),
+            acquisition_software_name: None,
+            acquisition_software_version: None,
+            start_timestamp: None,
+            mobility_array_kind: None,
+            analyzers: Vec::new(),
+            extra: BTreeMap::from([("openwraw.source_type".into(), "ESI".into())]),
+        }
+    }
+
+    #[test]
+    fn serde_round_trips_vendor_extras_and_acquisition_event_id() {
+        let spectrum: SpectrumRecord =
+            serde_json::from_str(&serde_json::to_string(&spectrum()).unwrap()).unwrap();
+        assert_eq!(spectrum.acquisition_event_id, Some(17));
+        assert_eq!(spectrum.extra["openszraw.event_label"], "survey");
+
+        let metadata: RunMetadata =
+            serde_json::from_str(&serde_json::to_string(&run_metadata()).unwrap()).unwrap();
+        assert_eq!(metadata.extra["openwraw.source_type"], "ESI");
+    }
+
+    #[test]
+    fn serde_defaults_new_fields_when_reading_old_records() {
+        let mut spectrum_json = serde_json::to_value(spectrum()).unwrap();
+        let spectrum_object = spectrum_json.as_object_mut().unwrap();
+        spectrum_object.remove("acquisition_event_id");
+        spectrum_object.remove("extra");
+        let spectrum: SpectrumRecord = serde_json::from_value(spectrum_json).unwrap();
+        assert_eq!(spectrum.acquisition_event_id, None);
+        assert!(spectrum.extra.is_empty());
+
+        let mut metadata_json = serde_json::to_value(run_metadata()).unwrap();
+        metadata_json.as_object_mut().unwrap().remove("extra");
+        let metadata: RunMetadata = serde_json::from_value(metadata_json).unwrap();
+        assert!(metadata.extra.is_empty());
+    }
 }

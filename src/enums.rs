@@ -10,7 +10,7 @@
 /// The variants follow Thermo's preamble encoding (the most detailed source
 /// available across vendors); other vendors map their detector class onto the
 /// closest equivalent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Analyzer {
     /// Ion trap.
     ITMS,
@@ -27,14 +27,14 @@ pub enum Analyzer {
 }
 
 /// Scan polarity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Polarity {
     Negative,
     Positive,
 }
 
 /// Whether a spectrum holds centroided peak picks or the raw profile signal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ScanMode {
     Centroid,
     Profile,
@@ -55,7 +55,7 @@ pub enum MsPower {
 }
 
 /// Activation method used for MSn fragmentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Activation {
     /// Higher-energy collisional dissociation (Q Exactive style).
     HCD,
@@ -105,7 +105,7 @@ pub enum Compression {
 ///
 /// Selects the CV term and unit emitted by the mzML writer when a
 /// [`crate::SpectrumRecord::inv_mobility_per_peak`] array is present.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MobilityArrayKind {
     /// Bruker TIMS convention: per-peak 1/K0 in volt-second per square
     /// centimeter. Emitted as MS:1003008 "raw inverse reduced ion mobility

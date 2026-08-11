@@ -186,6 +186,7 @@ mod tests {
                     start_timestamp: None,
                     mobility_array_kind: None,
                     analyzers: Vec::new(),
+                    extra: Default::default(),
                 },
                 rec: Some(rec),
             }
@@ -224,6 +225,7 @@ mod tests {
             polarity: Some(Polarity::Positive),
             scan_mode: Some(ScanMode::Profile),
             analyzer: None,
+            acquisition_event_id: None,
             filter: None,
             retention_time_sec: 1.0,
             total_ion_current: Some(intensity.iter().map(|&v| v as f64).sum()),
@@ -238,6 +240,7 @@ mod tests {
             mz,
             intensity,
             inv_mobility_per_peak: None,
+            extra: Default::default(),
         }
     }
 

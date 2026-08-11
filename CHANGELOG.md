@@ -6,6 +6,15 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `SpectrumRecord::extra` and `RunMetadata::extra` provide namespaced
+  reader-specific string key/value metadata, while
+  `SpectrumRecord::acquisition_event_id` provides a typed numeric grouping
+  identifier. The mzML writer projects these values as `userParam` entries.
+  Reader crates can adopt the new fields after this core release; acquisition
+  mode remains deferred in #17.
+
 ## [1.4.0] - 2026-07-28
 
 ### Added

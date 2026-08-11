@@ -554,6 +554,14 @@ fn write_prologue<W: Write>(
             escape(&meta.source_file_name)
         )?,
     }
+    for (name, value) in &meta.extra {
+        writeln!(
+            out,
+            r#"    <userParam name="{}" value="{}"/>"#,
+            escape(name),
+            escape(value)
+        )?;
+    }
     writeln!(
         out,
         r#"    <spectrumList count="{}" defaultDataProcessingRef="dp1">"#,
@@ -635,6 +643,21 @@ fn write_spectrum<W: Write>(
         r#"        <cvParam cvRef="MS" accession="{}" name="{}" value=""/>"#,
         spectrum_type.0, spectrum_type.1
     )?;
+
+    if let Some(event_id) = rec.acquisition_event_id {
+        writeln!(
+            out,
+            r#"        <userParam name="acquisition event id" value="{event_id}"/>"#
+        )?;
+    }
+    for (name, value) in &rec.extra {
+        writeln!(
+            out,
+            r#"        <userParam name="{}" value="{}"/>"#,
+            escape(name),
+            escape(value)
+        )?;
+    }
 
     match rec.scan_mode {
         Some(ScanMode::Centroid) => writeln!(
@@ -1088,6 +1111,7 @@ mod tests {
         start_timestamp: Option<String>,
         instrument_serial_number: Option<String>,
         analyzers: Vec<Analyzer>,
+        extra: std::collections::BTreeMap<String, String>,
         spectra: Vec<SpectrumRecord>,
         chroms: Vec<ChromatogramRecord>,
         extra_processing: Vec<(&'static str, &'static str)>,
@@ -1099,6 +1123,7 @@ mod tests {
                 start_timestamp: None,
                 instrument_serial_number: None,
                 analyzers: Vec::new(),
+                extra: Default::default(),
                 spectra: vec![minimal_spectrum(0, None)],
                 chroms: Vec::new(),
                 extra_processing: Vec::new(),
@@ -1121,6 +1146,7 @@ mod tests {
                 start_timestamp: self.start_timestamp.clone(),
                 mobility_array_kind: None,
                 analyzers: self.analyzers.clone(),
+                extra: self.extra.clone(),
             }
         }
 
@@ -1152,6 +1178,7 @@ mod tests {
             polarity: Some(Polarity::Positive),
             scan_mode: Some(ScanMode::Centroid),
             analyzer: None,
+            acquisition_event_id: None,
             filter: None,
             retention_time_sec: index as f64,
             total_ion_current: None,
@@ -1166,6 +1193,7 @@ mod tests {
             mz: vec![100.0],
             intensity: vec![1.0],
             inv_mobility_per_peak: None,
+            extra: Default::default(),
         }
     }
 
@@ -1596,6 +1624,25 @@ mod tests {
         let hex = &s[checksum_start..checksum_end];
         assert_eq!(hex.len(), 40, "SHA-1 hex digest must be 40 chars");
         assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn projects_vendor_extras_and_acquisition_event_id_as_user_params() {
+        let mut src = ToySource::new();
+        src.extra
+            .insert("openwraw.source_type".into(), "ESI & APCI".into());
+        src.spectra[0].acquisition_event_id = Some(42);
+        src.spectra[0]
+            .extra
+            .insert("openszraw.segment".into(), "A < B".into());
+
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let xml = String::from_utf8(buf).unwrap();
+
+        assert!(xml.contains(r#"<userParam name="openwraw.source_type" value="ESI &amp; APCI"/>"#));
+        assert!(xml.contains(r#"<userParam name="acquisition event id" value="42"/>"#));
+        assert!(xml.contains(r#"<userParam name="openszraw.segment" value="A &lt; B"/>"#));
     }
 
     // ---------- Sha1 test vectors (issue #11) -------------------------------

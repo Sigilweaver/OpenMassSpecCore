@@ -365,6 +365,7 @@ mod tests {
             polarity: Some(Polarity::Positive),
             scan_mode: Some(ScanMode::Centroid),
             analyzer: Some(Analyzer::TOFMS),
+            acquisition_event_id: None,
             filter: None,
             retention_time_sec: index as f64,
             total_ion_current: Some(intensity.iter().map(|&v| v as f64).sum()),
@@ -388,6 +389,7 @@ mod tests {
             },
             mz,
             intensity,
+            extra: Default::default(),
             inv_mobility_per_peak: mobility,
         }
     }
