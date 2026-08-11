@@ -110,6 +110,7 @@ impl OneSpectrumSource {
                 start_timestamp: None,
                 mobility_array_kind: None,
                 analyzers: Vec::new(),
+                extra: Default::default(),
             },
             spectrum: SpectrumRecord {
                 index: 0,
@@ -119,6 +120,7 @@ impl OneSpectrumSource {
                 polarity: Some(Polarity::Positive),
                 scan_mode: Some(ScanMode::Centroid),
                 analyzer: None,
+                acquisition_event_id: None,
                 filter: None,
                 retention_time_sec: 0.0,
                 total_ion_current: None,
@@ -133,6 +135,7 @@ impl OneSpectrumSource {
                 mz: vec![100.0, 200.0, 300.0],
                 intensity: vec![10.0, 5.0, 1.0],
                 inv_mobility_per_peak: None,
+                extra: Default::default(),
             },
         }
     }

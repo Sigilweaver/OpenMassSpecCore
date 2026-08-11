@@ -27,6 +27,7 @@ impl ToySource {
             start_timestamp: None,
             mobility_array_kind: None,
             analyzers: Vec::new(),
+            extra: Default::default(),
         };
         let s1 = SpectrumRecord {
             index: 0,
@@ -36,6 +37,7 @@ impl ToySource {
             polarity: Some(Polarity::Positive),
             scan_mode: Some(ScanMode::Centroid),
             analyzer: Some(Analyzer::FTMS),
+            acquisition_event_id: None,
             filter: Some("FTMS + p ESI Full ms".into()),
             retention_time_sec: 0.123 * 60.0,
             total_ion_current: None,
@@ -50,6 +52,7 @@ impl ToySource {
             mz: vec![100.0, 200.0, 300.0],
             intensity: vec![1.0, 5.0, 2.0],
             inv_mobility_per_peak: None,
+            extra: Default::default(),
         };
         let s2 = SpectrumRecord {
             index: 1,
@@ -59,6 +62,7 @@ impl ToySource {
             polarity: Some(Polarity::Positive),
             scan_mode: Some(ScanMode::Centroid),
             analyzer: Some(Analyzer::FTMS),
+            acquisition_event_id: None,
             filter: Some("FTMS + p ESI d Full ms2 200.00@hcd28.00".into()),
             retention_time_sec: 0.5 * 60.0,
             total_ion_current: Some(123.45),
@@ -85,6 +89,7 @@ impl ToySource {
             mz: vec![150.5, 160.0],
             intensity: vec![99.0, 50.0],
             inv_mobility_per_peak: None,
+            extra: Default::default(),
         };
         Self {
             meta,
