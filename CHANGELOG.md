@@ -6,6 +6,8 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-12
+
 ### Added
 
 - `SpectrumRecord::extra` and `RunMetadata::extra` provide namespaced
