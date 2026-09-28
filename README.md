@@ -4,7 +4,7 @@
 [![crates.io](https://img.shields.io/crates/v/openmassspec-core.svg)](https://crates.io/crates/openmassspec-core)
 [![docs.rs](https://img.shields.io/docsrs/openmassspec-core)](https://docs.rs/openmassspec-core)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Rust MSRV](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust MSRV](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 
 > Part of the [OpenMassSpec](https://sigilweaver.app/openmassspec/docs/)
 > stack for mass spectrometry raw-file access. Sibling readers:
@@ -19,7 +19,7 @@ the `SpectrumSource` trait every parser implements, the canonical
 Apache Arrow `RecordBatch` bridge, and a cross-vendor conformance
 harness.
 
-- MSRV: 1.85
+- MSRV: 1.88
 - License: Apache-2.0
 - `#![forbid(unsafe_code)]`
 

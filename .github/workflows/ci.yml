@@ -1,7 +1,7 @@
 # CI for OpenMassSpecCore.
 #
 # Standalone crate, no path-dependent siblings. Runs fmt + clippy + test
-# on Linux and macOS, a 1.85 MSRV check, and mzML schema validation of
+# on Linux and macOS, a 1.88 MSRV check, and mzML schema validation of
 # the canonical writer's output against the vendored PSI-MS XSD.
 
 name: CI
@@ -39,13 +39,13 @@ jobs:
       - run: cargo test --workspace --all-features
 
   msrv:
-    name: MSRV check (1.85)
+    name: MSRV check (1.88)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.85
+          toolchain: 1.88
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-features
 
