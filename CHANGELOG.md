@@ -6,6 +6,8 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-27
+
 ### Changed
 
 - **Breaking:** the `arrow` feature now uses arrow 60 (was 59). Code that
