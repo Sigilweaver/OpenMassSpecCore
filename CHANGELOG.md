@@ -14,6 +14,7 @@ crate adheres to [Semantic Versioning](https://semver.org/).
   passes this crate's `RecordBatch`/`Schema` values to other arrow crates must
   also use arrow 60. Reader crates that implement `SpectrumSource` need a
   major (or pre-1.0 minor) release to adopt this version.
+- **Breaking:** MSRV raised from 1.85 to 1.88, which arrow 60 requires.
 
 ### Added
 
