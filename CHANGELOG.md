@@ -6,6 +6,19 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** the `arrow` feature now uses arrow 60 (was 59). Code that
+  passes this crate's `RecordBatch`/`Schema` values to other arrow crates must
+  also use arrow 60. Reader crates that implement `SpectrumSource` need a
+  major (or pre-1.0 minor) release to adopt this version.
+
+### Added
+
+- Arrow spectrum batches now carry `acquisition_event_id` and the namespaced
+  `extra` map. The map uses the Arrow-spec field names `entries`, `key`, and
+  `value`. `ChromatogramRecord` can be serialized for Python bindings.
+
 ## [1.5.0] - 2026-08-12
 
 ### Added
