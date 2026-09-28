@@ -196,7 +196,7 @@ impl SpectrumRecord {
 }
 
 /// A chromatogram trace (TIC, BPC, SRM/MRM transition).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChromatogramRecord {
     pub index: usize,
     pub id: String,

@@ -27,9 +27,9 @@ default = []
 arrow = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-buffer"]
 
 [dependencies]
-arrow-array = { version = "59", optional = true }
-arrow-schema = { version = "59", optional = true }
-arrow-buffer = { version = "59", optional = true }
+arrow-array = { version = "60", optional = true }
+arrow-schema = { version = "60", optional = true }
+arrow-buffer = { version = "60", optional = true }
 thiserror = "2"
 # Default features (`rust_backend`, i.e. miniz_oxide) are a pure-safe-Rust
 # zlib implementation with no C compiler / system zlib requirement, matching

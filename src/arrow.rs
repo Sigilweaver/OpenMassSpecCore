@@ -21,13 +21,18 @@
 use std::sync::Arc;
 
 use arrow_array::builder::{
-    ArrayBuilder, Float32Builder, Float64Builder, Int32Builder, LargeListBuilder, StringBuilder,
-    UInt32Builder, UInt8Builder,
+    ArrayBuilder, Float32Builder, Float64Builder, Int32Builder, LargeListBuilder, MapBuilder,
+    MapFieldNames, StringBuilder, UInt32Builder, UInt8Builder,
 };
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 
 use crate::{Activation, Analyzer, MobilityArrayKind, Polarity, ScanMode, SpectrumRecord};
+
+// Arrow-spec map field names for the `extra` column.
+const EXTRA_ENTRIES_FIELD: &str = "entries";
+const EXTRA_KEY_FIELD: &str = "key";
+const EXTRA_VALUE_FIELD: &str = "value";
 
 /// Return the canonical [`Schema`] for a `RecordBatch` of spectra.
 pub fn spectrum_record_schema() -> SchemaRef {
@@ -67,6 +72,15 @@ pub fn spectrum_record_schema() -> SchemaRef {
         Field::new_large_list("intensity", int_item, false),
         Field::new_large_list("inv_mobility_per_peak", mob_item, true),
         Field::new("mobility_array_kind", DataType::Utf8, true),
+        Field::new("acquisition_event_id", DataType::UInt32, true),
+        Field::new_map(
+            "extra",
+            EXTRA_ENTRIES_FIELD,
+            Field::new(EXTRA_KEY_FIELD, DataType::Utf8, false),
+            Field::new(EXTRA_VALUE_FIELD, DataType::Utf8, true),
+            false,
+            false,
+        ),
     ]))
 }
 
@@ -159,6 +173,8 @@ pub struct SpectrumBatchBuilder {
     intensity: LargeListBuilder<Float32Builder>,
     inv_mobility_per_peak: LargeListBuilder<Float32Builder>,
     mobility_array_kind_col: StringBuilder,
+    acquisition_event_id: UInt32Builder,
+    extra: MapBuilder<StringBuilder, StringBuilder>,
 }
 
 impl SpectrumBatchBuilder {
@@ -207,6 +223,18 @@ impl SpectrumBatchBuilder {
             inv_mobility_per_peak: LargeListBuilder::new(Float32Builder::new())
                 .with_field(Arc::new(Field::new("item", DataType::Float32, false))),
             mobility_array_kind_col: StringBuilder::new(),
+            acquisition_event_id: UInt32Builder::new(),
+            // Field names are pinned so the builder always matches the
+            // schema, whatever arrow's `MapBuilder` defaults are.
+            extra: MapBuilder::new(
+                Some(MapFieldNames {
+                    entry: EXTRA_ENTRIES_FIELD.to_string(),
+                    key: EXTRA_KEY_FIELD.to_string(),
+                    value: EXTRA_VALUE_FIELD.to_string(),
+                }),
+                StringBuilder::new(),
+                StringBuilder::new(),
+            ),
         }
     }
 
@@ -291,6 +319,15 @@ impl SpectrumBatchBuilder {
         }
         self.mobility_array_kind_col
             .append_option(self.mobility_kind.map(mobility_kind_str));
+        self.acquisition_event_id
+            .append_option(rec.acquisition_event_id);
+        for (key, value) in &rec.extra {
+            self.extra.keys().append_value(key);
+            self.extra.values().append_value(value);
+        }
+        self.extra
+            .append(true)
+            .expect("extra keys and values are appended together");
     }
 
     /// Number of rows accumulated so far.
@@ -338,6 +375,8 @@ impl SpectrumBatchBuilder {
             Arc::new(self.intensity.finish()),
             Arc::new(self.inv_mobility_per_peak.finish()),
             Arc::new(self.mobility_array_kind_col.finish()),
+            Arc::new(self.acquisition_event_id.finish()),
+            Arc::new(self.extra.finish()),
         ];
         RecordBatch::try_new(self.schema.clone(), arrays)
     }
@@ -365,7 +404,7 @@ mod tests {
             polarity: Some(Polarity::Positive),
             scan_mode: Some(ScanMode::Centroid),
             analyzer: Some(Analyzer::TOFMS),
-            acquisition_event_id: None,
+            acquisition_event_id: (index == 0).then_some(7),
             filter: None,
             retention_time_sec: index as f64,
             total_ion_current: Some(intensity.iter().map(|&v| v as f64).sum()),
@@ -389,7 +428,13 @@ mod tests {
             },
             mz,
             intensity,
-            extra: Default::default(),
+            extra: if index == 0 {
+                [("opentfraw.resolution".to_string(), "120000".to_string())]
+                    .into_iter()
+                    .collect()
+            } else {
+                Default::default()
+            },
             inv_mobility_per_peak: mobility,
         }
     }
@@ -401,7 +446,7 @@ mod tests {
         b.push(&rec(1, 2, 4, false));
         let batch = b.finish().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.schema().fields().len(), 32);
+        assert_eq!(batch.schema().fields().len(), 34);
         let mz_col = batch
             .column_by_name("mz")
             .unwrap()
@@ -426,5 +471,33 @@ mod tests {
             .unwrap();
         assert_eq!(faims_col.value(0), -40.0);
         assert!(faims_col.is_null(1));
+        let event_col = batch
+            .column_by_name("acquisition_event_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow_array::UInt32Array>()
+            .unwrap();
+        assert_eq!(event_col.value(0), 7);
+        assert!(event_col.is_null(1));
+        let extra_col = batch
+            .column_by_name("extra")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow_array::MapArray>()
+            .unwrap();
+        assert_eq!(extra_col.value_length(0), 1);
+        assert_eq!(extra_col.value_length(1), 0);
+        let keys = extra_col
+            .keys()
+            .as_any()
+            .downcast_ref::<arrow_array::StringArray>()
+            .unwrap();
+        let values = extra_col
+            .values()
+            .as_any()
+            .downcast_ref::<arrow_array::StringArray>()
+            .unwrap();
+        assert_eq!(keys.value(0), "opentfraw.resolution");
+        assert_eq!(values.value(0), "120000");
     }
 }
