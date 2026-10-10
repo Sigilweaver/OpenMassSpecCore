@@ -227,24 +227,46 @@ fn escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn activation_cv(act: Activation, analyzer: Option<Analyzer>) -> (&'static str, &'static str) {
+type CvPair = (&'static str, &'static str);
+
+const BEAM_CID: CvPair = ("MS:1000422", "beam-type collision-induced dissociation");
+const CID: CvPair = ("MS:1000133", "collision-induced dissociation");
+const ETD: CvPair = ("MS:1000598", "electron transfer dissociation");
+
+/// PSI-MS dissociation-method cvParams for an [`Activation`]. Every pair
+/// here is checked against the PSI-MS OBO by `tests/cv_terms.rs`.
+///
+/// An empty slice means no PSI-MS term is a faithful match, so the writer
+/// emits no dissociation-method cvParam rather than guessing.
+fn activation_cv(act: Activation, analyzer: Option<Analyzer>) -> &'static [CvPair] {
     match act {
-        Activation::HCD => ("MS:1000422", "beam-type collision-induced dissociation"),
-        Activation::ETD | Activation::EThcD => ("MS:1000598", "electron transfer dissociation"),
+        Activation::HCD => &[BEAM_CID],
+        Activation::ETD => &[ETD],
+        // ETD plus the combined EThcD term, so readers that only look for
+        // ETD keep working while the supplemental HCD step is recorded.
+        Activation::EThcD => &[
+            ETD,
+            (
+                "MS:1002631",
+                "electron-transfer/higher-energy collision dissociation",
+            ),
+        ],
         Activation::CID => match analyzer {
-            Some(Analyzer::FTMS) => ("MS:1000422", "beam-type collision-induced dissociation"),
-            _ => ("MS:1000133", "collision-induced dissociation"),
+            Some(Analyzer::FTMS) => &[BEAM_CID],
+            _ => &[CID],
         },
-        Activation::MPID => (
-            "MS:1002481",
-            "supplemental beam-type collision-induced dissociation",
-        ),
-        Activation::ECD => ("MS:1000250", "electron capture dissociation"),
-        Activation::IRMPD => ("MS:1000262", "infrared multiphoton dissociation"),
-        Activation::PD => ("MS:1001880", "in-source collision-induced dissociation"),
-        Activation::PQD => ("MS:1000599", "pulsed q dissociation"),
-        Activation::UVPD => ("MS:1003246", "ultraviolet photodissociation"),
-        Activation::SID => ("MS:1000422", "beam-type collision-induced dissociation"),
+        // MS:1000435 carries the exact synonyms "multiphoton dissociation"
+        // and "MPD" in the PSI-MS CV.
+        Activation::MPID => &[("MS:1000435", "photodissociation")],
+        Activation::ECD => &[("MS:1000250", "electron capture dissociation")],
+        Activation::IRMPD => &[("MS:1000262", "infrared multiphoton dissociation")],
+        // "Proton transfer decay / activated-ion" has no matching PSI-MS
+        // dissociation term (MS:1001880 in-source CID, used before 2.0.1,
+        // describes something else entirely), so emit nothing.
+        Activation::PD => &[],
+        Activation::PQD => &[("MS:1000599", "pulsed q dissociation")],
+        Activation::UVPD => &[("MS:1003246", "ultraviolet photodissociation")],
+        Activation::SID => &[("MS:1000136", "surface-induced dissociation")],
     }
 }
 
@@ -851,23 +873,21 @@ fn write_spectrum<W: Write>(
         }
 
         writeln!(out, r#"            <activation>"#)?;
+        // Unknown activation: emit no dissociation method rather than
+        // asserting CID, which would be wrong for ETD/UVPD/... sources.
         if let Some(act) = pre.activation {
-            let (acc, name) = activation_cv(act, pre.analyzer);
-            writeln!(
-                out,
-                r#"              <cvParam cvRef="MS" accession="{acc}" name="{name}" value=""/>"#
-            )?;
-        } else {
-            writeln!(
-                out,
-                r#"              <cvParam cvRef="MS" accession="MS:1000133" name="collision-induced dissociation" value=""/>"#
-            )?;
+            for (acc, name) in activation_cv(act, pre.analyzer) {
+                writeln!(
+                    out,
+                    r#"              <cvParam cvRef="MS" accession="{acc}" name="{name}" value=""/>"#
+                )?;
+            }
         }
         if let Some(e) = pre.collision_energy {
             if pre.ce_is_nce {
                 writeln!(
                     out,
-                    r#"              <cvParam cvRef="MS" accession="MS:1002013" name="normalized collision energy" value="{:.2}"/>"#,
+                    r#"              <cvParam cvRef="MS" accession="MS:1000138" name="normalized collision energy" value="{:.2}" unitCvRef="UO" unitAccession="UO:0000187" unitName="percent"/>"#,
                     e
                 )?;
             } else {
@@ -1015,11 +1035,10 @@ fn write_chromatogram<W: Write>(
             mz
         )?;
         writeln!(out, r#"          </isolationWindow>"#)?;
+        // `<activation>` is required inside `<precursor>`, but
+        // `ChromatogramRecord` carries no activation method, so leave it
+        // empty rather than asserting CID.
         writeln!(out, r#"          <activation>"#)?;
-        writeln!(
-            out,
-            r#"            <cvParam cvRef="MS" accession="MS:1000133" name="collision-induced dissociation" value=""/>"#
-        )?;
         writeln!(out, r#"          </activation>"#)?;
         writeln!(out, r#"        </precursor>"#)?;
     }
@@ -1411,6 +1430,64 @@ mod tests {
         write_mzml(&mut src, &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(!s.contains("MS:1002954"));
+    }
+
+    fn ms2_with(activation: Option<Activation>, nce: Option<f64>) -> String {
+        let mut src = ToySource::new();
+        src.spectra = vec![SpectrumRecord {
+            ms_level: 2,
+            precursor: Some(crate::types::PrecursorInfo {
+                selected_mz: Some(500.5),
+                activation,
+                collision_energy: nce,
+                ce_is_nce: nce.is_some(),
+                ..Default::default()
+            }),
+            ..minimal_spectrum(0, None)
+        }];
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn activation_block(xml: &str) -> &str {
+        let start = xml.find("<activation>").unwrap();
+        let end = xml.find("</activation>").unwrap();
+        &xml[start..end]
+    }
+
+    #[test]
+    fn normalized_collision_energy_uses_ms_1000138_with_percent_unit() {
+        let s = ms2_with(Some(Activation::HCD), Some(30.0));
+        assert!(s.contains(
+            r#"<cvParam cvRef="MS" accession="MS:1000138" name="normalized collision energy" value="30.00" unitCvRef="UO" unitAccession="UO:0000187" unitName="percent"/>"#
+        ));
+        assert!(!s.contains("MS:1002013"));
+    }
+
+    #[test]
+    fn unknown_activation_emits_no_dissociation_method() {
+        let s = ms2_with(None, None);
+        let block = activation_block(&s);
+        assert!(!block.contains("cvParam"), "{block}");
+    }
+
+    #[test]
+    fn activation_terms_match_psi_ms() {
+        let cases: &[(Activation, &[&str])] = &[
+            (Activation::SID, &["MS:1000136"]),
+            (Activation::MPID, &["MS:1000435"]),
+            (Activation::EThcD, &["MS:1000598", "MS:1002631"]),
+            (Activation::PD, &[]),
+        ];
+        for (act, expected) in cases {
+            let s = ms2_with(Some(*act), None);
+            let block = activation_block(&s);
+            assert_eq!(block.matches("<cvParam").count(), expected.len(), "{act:?}");
+            for acc in *expected {
+                assert!(block.contains(acc), "{act:?} missing {acc}");
+            }
+        }
     }
 
     #[test]

@@ -6,6 +6,20 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- mzML writer: normalized collision energy is now `MS:1000138` with unit
+  `UO:0000187` (percent). It was emitted as `MS:1002013`, which is
+  "collision energy ramp start".
+- mzML writer: activation terms checked against the PSI-MS CV. SID is now
+  `MS:1000136` (was beam-type CID), MPID is `MS:1000435` "photodissociation"
+  (was a mismatched `MS:1002481` accession/name pair), and EThcD adds
+  `MS:1002631` next to ETD. PD has no matching PSI-MS term and no longer
+  claims in-source CID (`MS:1001880`).
+- mzML writer: when a precursor's activation is unknown, and for chromatogram
+  precursors, `<activation>` no longer defaults to CID; it carries no
+  dissociation-method term.
+
 ## [2.0.0] - 2026-09-27
 
 ### Changed
