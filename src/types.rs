@@ -39,8 +39,27 @@ impl<'de> serde::Deserialize<'de> for CvTerm {
     }
 }
 
+/// Return a `&'static str` for a deserialized accession.
+///
+/// `CvTerm::accession` is `&'static str`, so a deserialized value has to be
+/// leaked. Leak each distinct accession once and reuse it afterwards, so
+/// memory grows with the number of distinct accessions seen (a few hundred
+/// in practice) rather than with the number of terms deserialized.
 fn intern_accession(value: String) -> &'static str {
-    Box::leak(value.into_boxed_str())
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+
+    static INTERNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let mut set = INTERNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(existing) = set.get(value.as_str()) {
+        return existing;
+    }
+    let leaked: &'static str = Box::leak(value.into_boxed_str());
+    set.insert(leaked);
+    leaked
 }
 
 impl CvTerm {
@@ -275,6 +294,16 @@ pub struct RunMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deserialized_accessions_are_interned_once() {
+        let json = r#"{"accession":"MS:1000563","name":"Thermo RAW format"}"#;
+        let a: CvTerm = serde_json::from_str(json).unwrap();
+        let b: CvTerm = serde_json::from_str(json).unwrap();
+        assert_eq!(a, CvTerm::new("MS:1000563", "Thermo RAW format"));
+        // Same allocation: the second deserialize reused the first leak.
+        assert!(std::ptr::eq(a.accession, b.accession));
+    }
 
     fn spectrum() -> SpectrumRecord {
         SpectrumRecord {

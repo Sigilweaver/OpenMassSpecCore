@@ -33,6 +33,9 @@ crate adheres to [Semantic Versioning](https://semver.org/).
   report a mismatch.
 - Indexed mzML: `<offset>` and `<indexListOffset>` values now point at the
   element's `<` rather than at the leading indentation.
+- `CvTerm` deserialization leaks each distinct accession string once and
+  reuses it. It leaked a new string for every term deserialized, so memory
+  grew without bound in long-running consumers.
 
 ## [2.0.0] - 2026-09-27
 
