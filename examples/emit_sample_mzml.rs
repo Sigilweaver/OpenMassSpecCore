@@ -27,7 +27,9 @@ struct SampleSource {
 impl SampleSource {
     fn new() -> Self {
         let meta = RunMetadata {
-            source_file_name: "sample.raw".into(),
+            // Digit-leading on purpose: `<run id>` is an `xs:ID`, so this
+            // checks the writer turns it into a valid NCName.
+            source_file_name: "20260601_sample.raw".into(),
             source_file_format: CvTerm::new("MS:1000563", "Thermo RAW format"),
             native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
             instrument: CvTerm::new("MS:1001911", "Q Exactive"),

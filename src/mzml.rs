@@ -592,17 +592,16 @@ fn write_prologue<W: Write>(
     writeln!(out, r#"    </dataProcessing>"#)?;
     writeln!(out, r#"  </dataProcessingList>"#)?;
 
+    let run_id = run_id(meta);
     match &meta.start_timestamp {
         Some(ts) => writeln!(
             out,
-            r#"  <run id="{}" defaultInstrumentConfigurationRef="IC1" defaultSourceFileRef="sf1" startTimeStamp="{}">"#,
-            escape(&meta.source_file_name),
+            r#"  <run id="{run_id}" defaultInstrumentConfigurationRef="IC1" defaultSourceFileRef="sf1" startTimeStamp="{}">"#,
             escape(ts)
         )?,
         None => writeln!(
             out,
-            r#"  <run id="{}" defaultInstrumentConfigurationRef="IC1" defaultSourceFileRef="sf1">"#,
-            escape(&meta.source_file_name)
+            r#"  <run id="{run_id}" defaultInstrumentConfigurationRef="IC1" defaultSourceFileRef="sf1">"#
         )?,
     }
     for (name, value) in &meta.extra {
@@ -619,6 +618,41 @@ fn write_prologue<W: Write>(
         n_spectra
     )?;
     Ok(())
+}
+
+/// Derive the `<run id>` from the source file name. `id` is an `xs:ID`, so it
+/// must be an XML NCName: a file name such as `20260101_sample.raw` (leading
+/// digit) or one containing spaces would otherwise fail schema validation.
+///
+/// Characters outside `[A-Za-z0-9._-]` become `_`. A `run_` prefix is added
+/// when the result does not start with a letter or `_`, or when it would
+/// collide with another fixed id in the document. Names that are already
+/// valid pass through unchanged.
+fn run_id(meta: &RunMetadata) -> String {
+    let mut id: String = meta
+        .source_file_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let starts_ok = id
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    let collides = id == "sf1"
+        || id == "dp1"
+        || id == ACQUISITION_SOFTWARE_ID
+        || id == meta.software_name
+        || (id.starts_with("IC") && id[2..].parse::<usize>().is_ok());
+    if !starts_ok || collides {
+        id.insert_str(0, "run_");
+    }
+    id
 }
 
 /// PSI-MS mass-analyzer-component CV term for each [`Analyzer`] variant.
@@ -1156,6 +1190,7 @@ mod tests {
     }
 
     struct ToySource {
+        source_file_name: String,
         start_timestamp: Option<String>,
         instrument_serial_number: Option<String>,
         acquisition_software_name: Option<String>,
@@ -1170,6 +1205,7 @@ mod tests {
     impl ToySource {
         fn new() -> Self {
             Self {
+                source_file_name: "toy.raw".into(),
                 start_timestamp: None,
                 instrument_serial_number: None,
                 acquisition_software_name: None,
@@ -1186,7 +1222,7 @@ mod tests {
     impl SpectrumSource for ToySource {
         fn run_metadata(&self) -> RunMetadata {
             RunMetadata {
-                source_file_name: "toy.raw".into(),
+                source_file_name: self.source_file_name.clone(),
                 source_file_format: CvTerm::new("MS:1000563", "Thermo RAW format"),
                 native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
                 instrument: CvTerm::new("MS:1001911", "Q Exactive"),
@@ -1354,6 +1390,50 @@ mod tests {
         write_mzml(&mut src, &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains(r#"<software id="acquisition_software" version="">"#));
+    }
+
+    fn is_ncname(s: &str) -> bool {
+        let mut chars = s.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    }
+
+    #[test]
+    fn run_id_is_a_valid_ncname() {
+        let meta = |name: &str| RunMetadata {
+            source_file_name: name.into(),
+            ..ToySource::new().run_metadata()
+        };
+        assert_eq!(run_id(&meta("toy.raw")), "toy.raw");
+        assert_eq!(run_id(&meta("_x.d")), "_x.d");
+        assert_eq!(
+            run_id(&meta("20260101_sample.raw")),
+            "run_20260101_sample.raw"
+        );
+        assert_eq!(run_id(&meta("my run (1).wiff")), "my_run__1_.wiff");
+        assert_eq!(run_id(&meta("-a")), "run_-a");
+        assert_eq!(run_id(&meta("")), "run_");
+        assert_eq!(run_id(&meta("dp1")), "run_dp1");
+        assert_eq!(run_id(&meta("IC2")), "run_IC2");
+        assert_eq!(run_id(&meta("toy")), "run_toy");
+        for name in ["0.raw", "a b", "\u{e9}t\u{e9}.raw", "a:b", ""] {
+            let id = run_id(&meta(name));
+            assert!(is_ncname(&id), "{name:?} -> {id:?}");
+        }
+    }
+
+    #[test]
+    fn run_id_uses_sanitized_name_for_digit_leading_file() {
+        let mut src = ToySource::new();
+        src.source_file_name = "2026 sample.raw".into();
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<run id="run_2026_sample.raw" "#));
+        // sourceFile name keeps the original, unsanitized file name.
+        assert!(s.contains(r#"<sourceFile id="sf1" name="2026 sample.raw""#));
     }
 
     #[test]

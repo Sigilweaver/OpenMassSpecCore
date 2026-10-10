@@ -23,6 +23,10 @@ crate adheres to [Semantic Versioning](https://semver.org/).
   (`id="acquisition_software"`) documented in 1.4.0. It was dropped by the
   zlib compression change, so `RunMetadata::acquisition_software_name` was
   silently ignored.
+- mzML writer: `<run id>` is now a valid `xs:ID`. It used the raw source file
+  name, so names starting with a digit or containing spaces failed XSD
+  validation. Invalid characters become `_`, and a `run_` prefix is added
+  when needed. Names that were already valid are unchanged.
 
 ## [2.0.0] - 2026-09-27
 
