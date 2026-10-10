@@ -6,18 +6,14 @@
 //! dependency just for this one footer. That implementation has its own
 //! unit tests against NIST vectors in `src/mzml.rs`, but nothing exercised
 //! the actual code path that feeds a generated document's bytes through it.
-//! This test closes that gap: it generates a small indexed-mzML document
+//! This test covers that path: it generates a small indexed-mzML document
 //! through the public API, recomputes SHA-1 over the same bytes with a
 //! second, independent implementation written here, and asserts the two
 //! agree.
 //!
-//! Note: the current implementation hashes everything written up to and
-//! including the closing `</indexList>` tag, and stops there - it does
-//! not include the `<indexListOffset>` element or the `<fileChecksum>`
-//! open tag in the digest. This test locks down that actual behavior (so
-//! a refactor can't silently change it without a test failing) rather
-//! than asserting what the bundled schema doc-comment describes as the
-//! nominal scope; see the accompanying PR discussion for that discrepancy.
+//! Scope: per the mzML 1.1 specification, the digest covers the document
+//! from its first byte up to and including the `<fileChecksum>` open tag
+//! (the same scope ProteoWizard and mzdata use).
 
 use openmassspec_core::{
     write_indexed_mzml, CvTerm, Polarity, RunMetadata, ScanMode, SpectrumRecord, SpectrumSource,
@@ -161,14 +157,14 @@ fn embedded_file_checksum_matches_independent_sha1_recompute() {
     let mut buf = Vec::new();
     write_indexed_mzml(&mut src, &mut buf).unwrap();
 
-    let needle = b"</indexList>\n";
-    let end_of_index_list = buf
+    let needle = b"<fileChecksum>";
+    let end_of_open_tag = buf
         .windows(needle.len())
         .position(|w| w == needle)
-        .expect("generated document must contain a closing </indexList> tag")
+        .expect("generated document must contain a <fileChecksum> open tag")
         + needle.len();
 
-    let expected = sha1_hex(&buf[..end_of_index_list]);
+    let expected = sha1_hex(&buf[..end_of_open_tag]);
 
     let s = String::from_utf8(buf.clone()).unwrap();
     let open = s
@@ -184,7 +180,7 @@ fn embedded_file_checksum_matches_independent_sha1_recompute() {
     assert_eq!(
         embedded, expected,
         "embedded <fileChecksum> should equal an independently-recomputed \
-         SHA-1 of the bytes written up to and including </indexList>"
+         SHA-1 of the bytes up to and including the <fileChecksum> open tag"
     );
     // Sanity: a real 40-char lowercase hex SHA-1 digest, not an empty or
     // truncated string.

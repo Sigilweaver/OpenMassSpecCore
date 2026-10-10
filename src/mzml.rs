@@ -8,11 +8,9 @@
 //! chromatogram time/intensity) are zlib-compressed (`MS:1000574`) by
 //! default, matching msconvert/OpenMS output; use
 //! [`write_mzml_with_compression`]/[`write_indexed_mzml_with_compression`]
-//! to opt back into the uncompressed (`MS:1000576`) layout the writer used
-//! before 1.4.
+//! to write uncompressed (`MS:1000576`) arrays instead.
 //!
-//! The implementation here is the vendor-neutral lift of the writer that
-//! originally lived in `opentfraw::mzml`. All vendor-specific decisions (the
+//! The writer is vendor-neutral. All vendor-specific decisions (the
 //! source-file CV term, the native-ID format CV term, the instrument CV term,
 //! the per-scan `native_id` strings) come from the source's
 //! [`RunMetadata`](crate::RunMetadata) and from each
@@ -227,24 +225,46 @@ fn escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn activation_cv(act: Activation, analyzer: Option<Analyzer>) -> (&'static str, &'static str) {
+type CvPair = (&'static str, &'static str);
+
+const BEAM_CID: CvPair = ("MS:1000422", "beam-type collision-induced dissociation");
+const CID: CvPair = ("MS:1000133", "collision-induced dissociation");
+const ETD: CvPair = ("MS:1000598", "electron transfer dissociation");
+
+/// PSI-MS dissociation-method cvParams for an [`Activation`]. Every pair
+/// here is checked against the PSI-MS OBO by `tests/cv_terms.rs`.
+///
+/// An empty slice means no PSI-MS term is a faithful match, so the writer
+/// emits no dissociation-method cvParam rather than guessing.
+fn activation_cv(act: Activation, analyzer: Option<Analyzer>) -> &'static [CvPair] {
     match act {
-        Activation::HCD => ("MS:1000422", "beam-type collision-induced dissociation"),
-        Activation::ETD | Activation::EThcD => ("MS:1000598", "electron transfer dissociation"),
+        Activation::HCD => &[BEAM_CID],
+        Activation::ETD => &[ETD],
+        // ETD plus the combined EThcD term, so readers that only look for
+        // ETD keep working while the supplemental HCD step is recorded.
+        Activation::EThcD => &[
+            ETD,
+            (
+                "MS:1002631",
+                "electron-transfer/higher-energy collision dissociation",
+            ),
+        ],
         Activation::CID => match analyzer {
-            Some(Analyzer::FTMS) => ("MS:1000422", "beam-type collision-induced dissociation"),
-            _ => ("MS:1000133", "collision-induced dissociation"),
+            Some(Analyzer::FTMS) => &[BEAM_CID],
+            _ => &[CID],
         },
-        Activation::MPID => (
-            "MS:1002481",
-            "supplemental beam-type collision-induced dissociation",
-        ),
-        Activation::ECD => ("MS:1000250", "electron capture dissociation"),
-        Activation::IRMPD => ("MS:1000262", "infrared multiphoton dissociation"),
-        Activation::PD => ("MS:1001880", "in-source collision-induced dissociation"),
-        Activation::PQD => ("MS:1000599", "pulsed q dissociation"),
-        Activation::UVPD => ("MS:1003246", "ultraviolet photodissociation"),
-        Activation::SID => ("MS:1000422", "beam-type collision-induced dissociation"),
+        // MS:1000435 carries the exact synonyms "multiphoton dissociation"
+        // and "MPD" in the PSI-MS CV.
+        Activation::MPID => &[("MS:1000435", "photodissociation")],
+        Activation::ECD => &[("MS:1000250", "electron capture dissociation")],
+        Activation::IRMPD => &[("MS:1000262", "infrared multiphoton dissociation")],
+        // "Proton transfer decay / activated-ion" has no matching PSI-MS
+        // dissociation term (MS:1001880 in-source CID describes something
+        // else entirely), so emit nothing.
+        Activation::PD => &[],
+        Activation::PQD => &[("MS:1000599", "pulsed q dissociation")],
+        Activation::UVPD => &[("MS:1003246", "ultraviolet photodissociation")],
+        Activation::SID => &[("MS:1000136", "surface-induced dissociation")],
     }
 }
 
@@ -272,6 +292,7 @@ pub fn write_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>(
 
     write_prologue(out, &meta, count, false, &extra_processing)?;
     for rec in src.iter_spectra() {
+        out.write_all(RECORD_INDENT.as_bytes())?;
         write_spectrum(out, &rec, mobility_kind, &analyzer_ic_ids, compression)?;
     }
     writeln!(out, r#"    </spectrumList>"#)?;
@@ -284,6 +305,7 @@ pub fn write_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>(
             chroms.len()
         )?;
         for rec in &chroms {
+            out.write_all(RECORD_INDENT.as_bytes())?;
             write_chromatogram(out, rec, compression)?;
         }
         writeln!(out, r#"    </chromatogramList>"#)?;
@@ -310,8 +332,9 @@ pub fn write_indexed_mzml<S: SpectrumSource + ?Sized, W: Write>(
 /// [`Compression`].
 ///
 /// The `<fileChecksum>` SHA-1 is computed over the bytes actually written to
-/// `out` (via the internal counting/hashing writer), so it covers whichever
-/// codec produced the `<binary>` payloads with no separate handling needed.
+/// `out`, from the start of the document up to and including the
+/// `<fileChecksum>` open tag, as mzML 1.1 specifies. Each `<offset>` and the
+/// `<indexListOffset>` give the byte position of the element's `<`.
 pub fn write_indexed_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>(
     src: &mut S,
     out: &mut W,
@@ -328,6 +351,8 @@ pub fn write_indexed_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>
 
     let mut offsets: Vec<(String, u64)> = Vec::with_capacity(count);
     for rec in src.iter_spectra() {
+        // Offsets point at the element's `<`, so write the indent first.
+        cw.write_all(RECORD_INDENT.as_bytes())?;
         offsets.push((rec.native_id.clone(), cw.pos));
         write_spectrum(&mut cw, &rec, mobility_kind, &analyzer_ic_ids, compression)?;
     }
@@ -343,6 +368,7 @@ pub fn write_indexed_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>
             chroms.len()
         )?;
         for rec in &chroms {
+            cw.write_all(RECORD_INDENT.as_bytes())?;
             chrom_offsets.push((rec.id.clone(), cw.pos));
             write_chromatogram(&mut cw, rec, compression)?;
         }
@@ -352,9 +378,10 @@ pub fn write_indexed_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>
     writeln!(cw, r#"  </run>"#)?;
     writeln!(cw, r#"  </mzML>"#)?;
 
+    cw.write_all(b"  ")?;
     let index_list_offset = cw.pos;
     let n_indexes = 1 + usize::from(!chrom_offsets.is_empty());
-    writeln!(cw, r#"  <indexList count="{n_indexes}">"#)?;
+    writeln!(cw, r#"<indexList count="{n_indexes}">"#)?;
     writeln!(cw, r#"    <index name="spectrum">"#)?;
     for (id, offset) in &offsets {
         writeln!(
@@ -379,21 +406,31 @@ pub fn write_indexed_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>
     }
     writeln!(cw, r#"  </indexList>"#)?;
 
-    cw.hashing = false;
-    let digest = std::mem::replace(&mut cw.sha1, Sha1::new()).finalize();
-    let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-
     writeln!(
         cw,
         r#"  <indexListOffset>{}</indexListOffset>"#,
         index_list_offset
     )?;
-    writeln!(cw, r#"  <fileChecksum>{}</fileChecksum>"#, hex)?;
+    // mzML 1.1: the SHA-1 covers the file from the start up to and
+    // including the `<fileChecksum>` open tag (as pwiz and mzdata do).
+    write!(cw, r#"  <fileChecksum>"#)?;
+    cw.hashing = false;
+    let digest = std::mem::replace(&mut cw.sha1, Sha1::new()).finalize();
+    let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+    writeln!(cw, r#"{}</fileChecksum>"#, hex)?;
     writeln!(cw, r#"</indexedmzML>"#)?;
     Ok(())
 }
 
 // ---------- prologue / spectrum body ---------------------------------------
+
+/// Indent in front of each `<spectrum>`/`<chromatogram>` open tag. Callers
+/// write it before calling [`write_spectrum`]/[`write_chromatogram`] so the
+/// indexed writer can record offsets that point at the element's `<`.
+const RECORD_INDENT: &str = "      ";
+
+/// Fixed `xs:ID` of the acquisition-software `<software>` entry.
+const ACQUISITION_SOFTWARE_ID: &str = "acquisition_software";
 
 fn write_prologue<W: Write>(
     out: &mut W,
@@ -467,7 +504,11 @@ fn write_prologue<W: Write>(
     writeln!(out, r#"    </sourceFileList>"#)?;
     writeln!(out, r#"  </fileDescription>"#)?;
 
-    writeln!(out, r#"  <softwareList count="1">"#)?;
+    writeln!(
+        out,
+        r#"  <softwareList count="{}">"#,
+        1 + usize::from(meta.acquisition_software_name.is_some())
+    )?;
     writeln!(
         out,
         r#"    <software id="{}" version="{}">"#,
@@ -480,6 +521,28 @@ fn write_prologue<W: Write>(
         escape(&meta.software_name)
     )?;
     writeln!(out, r#"    </software>"#)?;
+    if let Some(name) = &meta.acquisition_software_name {
+        // A fixed id (rather than one derived from `name`) because `name`
+        // comes from vendor metadata and is not guaranteed to be a valid
+        // XML `xs:ID` (e.g. "Xcalibur 4.4" contains a space). No
+        // `processingMethod` references this software, so a fixed id has no
+        // downstream effect.
+        writeln!(
+            out,
+            r#"    <software id="{ACQUISITION_SOFTWARE_ID}" version="{}">"#,
+            escape(meta.acquisition_software_version.as_deref().unwrap_or(""))
+        )?;
+        // Vendor acquisition software each has its own PSI-MS term, but
+        // mapping vendor-reported names to accessions would need every
+        // string verified against the CV, so use the generic term and keep
+        // the real name as the value.
+        writeln!(
+            out,
+            r#"      <cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="{}"/>"#,
+            escape(name)
+        )?;
+        writeln!(out, r#"    </software>"#)?;
+    }
     writeln!(out, r#"  </softwareList>"#)?;
 
     writeln!(
@@ -541,17 +604,16 @@ fn write_prologue<W: Write>(
     writeln!(out, r#"    </dataProcessing>"#)?;
     writeln!(out, r#"  </dataProcessingList>"#)?;
 
+    let run_id = run_id(meta);
     match &meta.start_timestamp {
         Some(ts) => writeln!(
             out,
-            r#"  <run id="{}" defaultInstrumentConfigurationRef="IC1" defaultSourceFileRef="sf1" startTimeStamp="{}">"#,
-            escape(&meta.source_file_name),
+            r#"  <run id="{run_id}" defaultInstrumentConfigurationRef="IC1" defaultSourceFileRef="sf1" startTimeStamp="{}">"#,
             escape(ts)
         )?,
         None => writeln!(
             out,
-            r#"  <run id="{}" defaultInstrumentConfigurationRef="IC1" defaultSourceFileRef="sf1">"#,
-            escape(&meta.source_file_name)
+            r#"  <run id="{run_id}" defaultInstrumentConfigurationRef="IC1" defaultSourceFileRef="sf1">"#
         )?,
     }
     for (name, value) in &meta.extra {
@@ -568,6 +630,41 @@ fn write_prologue<W: Write>(
         n_spectra
     )?;
     Ok(())
+}
+
+/// Derive the `<run id>` from the source file name. `id` is an `xs:ID`, so it
+/// must be an XML NCName: a file name such as `20260101_sample.raw` (leading
+/// digit) or one containing spaces would otherwise fail schema validation.
+///
+/// Characters outside `[A-Za-z0-9._-]` become `_`. A `run_` prefix is added
+/// when the result does not start with a letter or `_`, or when it would
+/// collide with another fixed id in the document. Names that are already
+/// valid pass through unchanged.
+fn run_id(meta: &RunMetadata) -> String {
+    let mut id: String = meta
+        .source_file_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let starts_ok = id
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    let collides = id == "sf1"
+        || id == "dp1"
+        || id == ACQUISITION_SOFTWARE_ID
+        || id == meta.software_name
+        || (id.starts_with("IC") && id[2..].parse::<usize>().is_ok());
+    if !starts_ok || collides {
+        id.insert_str(0, "run_");
+    }
+    id
 }
 
 /// PSI-MS mass-analyzer-component CV term for each [`Analyzer`] variant.
@@ -628,7 +725,7 @@ fn write_spectrum<W: Write>(
     });
     writeln!(
         out,
-        r#"      <spectrum id="{sid}" index="{idx}" defaultArrayLength="{n}">"#,
+        r#"<spectrum id="{sid}" index="{idx}" defaultArrayLength="{n}">"#,
         sid = escape(&rec.native_id),
         idx = rec.index,
         n = n_peaks
@@ -851,23 +948,21 @@ fn write_spectrum<W: Write>(
         }
 
         writeln!(out, r#"            <activation>"#)?;
+        // Unknown activation: emit no dissociation method rather than
+        // asserting CID, which would be wrong for ETD/UVPD/... sources.
         if let Some(act) = pre.activation {
-            let (acc, name) = activation_cv(act, pre.analyzer);
-            writeln!(
-                out,
-                r#"              <cvParam cvRef="MS" accession="{acc}" name="{name}" value=""/>"#
-            )?;
-        } else {
-            writeln!(
-                out,
-                r#"              <cvParam cvRef="MS" accession="MS:1000133" name="collision-induced dissociation" value=""/>"#
-            )?;
+            for (acc, name) in activation_cv(act, pre.analyzer) {
+                writeln!(
+                    out,
+                    r#"              <cvParam cvRef="MS" accession="{acc}" name="{name}" value=""/>"#
+                )?;
+            }
         }
         if let Some(e) = pre.collision_energy {
             if pre.ce_is_nce {
                 writeln!(
                     out,
-                    r#"              <cvParam cvRef="MS" accession="MS:1002013" name="normalized collision energy" value="{:.2}"/>"#,
+                    r#"              <cvParam cvRef="MS" accession="MS:1000138" name="normalized collision energy" value="{:.2}" unitCvRef="UO" unitAccession="UO:0000187" unitName="percent"/>"#,
                     e
                 )?;
             } else {
@@ -940,20 +1035,18 @@ fn write_spectrum<W: Write>(
         writeln!(out, r#"          </binaryDataArray>"#)?;
 
         if let Some(mobility_b64) = mobility_b64_opt {
-            let (cv_acc, cv_name, unit_acc, unit_ref, unit_name) = match mobility_kind {
+            // (array term, unit cvRef, unit term); each term is an
+            // (accession, name) pair so tests/cv_terms.rs can check it.
+            let ((cv_acc, cv_name), unit_ref, (unit_acc, unit_name)) = match mobility_kind {
                 Some(MobilityArrayKind::DriftTimeMilliseconds) => (
-                    "MS:1003007",
-                    "raw ion mobility array",
-                    "UO:0000028",
+                    ("MS:1003007", "raw ion mobility array"),
                     "UO",
-                    "millisecond",
+                    ("UO:0000028", "millisecond"),
                 ),
                 Some(MobilityArrayKind::InverseReducedVsPerCm2) | None => (
-                    "MS:1003008",
-                    "raw inverse reduced ion mobility array",
-                    "MS:1002814",
+                    ("MS:1003008", "raw inverse reduced ion mobility array"),
                     "MS",
-                    "volt-second per square centimeter",
+                    ("MS:1002814", "volt-second per square centimeter"),
                 ),
             };
             writeln!(
@@ -993,7 +1086,7 @@ fn write_chromatogram<W: Write>(
 
     writeln!(
         out,
-        r#"      <chromatogram id="{id}" index="{idx}" defaultArrayLength="{n}">"#,
+        r#"<chromatogram id="{id}" index="{idx}" defaultArrayLength="{n}">"#,
         id = escape(&rec.id),
         idx = rec.index,
     )?;
@@ -1015,11 +1108,10 @@ fn write_chromatogram<W: Write>(
             mz
         )?;
         writeln!(out, r#"          </isolationWindow>"#)?;
+        // `<activation>` is required inside `<precursor>`, but
+        // `ChromatogramRecord` carries no activation method, so leave it
+        // empty rather than asserting CID.
         writeln!(out, r#"          <activation>"#)?;
-        writeln!(
-            out,
-            r#"            <cvParam cvRef="MS" accession="MS:1000133" name="collision-induced dissociation" value=""/>"#
-        )?;
         writeln!(out, r#"          </activation>"#)?;
         writeln!(out, r#"        </precursor>"#)?;
     }
@@ -1108,8 +1200,11 @@ mod tests {
     }
 
     struct ToySource {
+        source_file_name: String,
         start_timestamp: Option<String>,
         instrument_serial_number: Option<String>,
+        acquisition_software_name: Option<String>,
+        acquisition_software_version: Option<String>,
         analyzers: Vec<Analyzer>,
         extra: std::collections::BTreeMap<String, String>,
         spectra: Vec<SpectrumRecord>,
@@ -1120,8 +1215,11 @@ mod tests {
     impl ToySource {
         fn new() -> Self {
             Self {
+                source_file_name: "toy.raw".into(),
                 start_timestamp: None,
                 instrument_serial_number: None,
+                acquisition_software_name: None,
+                acquisition_software_version: None,
                 analyzers: Vec::new(),
                 extra: Default::default(),
                 spectra: vec![minimal_spectrum(0, None)],
@@ -1134,13 +1232,13 @@ mod tests {
     impl SpectrumSource for ToySource {
         fn run_metadata(&self) -> RunMetadata {
             RunMetadata {
-                source_file_name: "toy.raw".into(),
+                source_file_name: self.source_file_name.clone(),
                 source_file_format: CvTerm::new("MS:1000563", "Thermo RAW format"),
                 native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
                 instrument: CvTerm::new("MS:1001911", "Q Exactive"),
                 instrument_serial_number: self.instrument_serial_number.clone(),
-                acquisition_software_name: None,
-                acquisition_software_version: None,
+                acquisition_software_name: self.acquisition_software_name.clone(),
+                acquisition_software_version: self.acquisition_software_version.clone(),
                 software_name: "toy".into(),
                 software_version: "0.0.0".into(),
                 start_timestamp: self.start_timestamp.clone(),
@@ -1265,6 +1363,90 @@ mod tests {
     }
 
     #[test]
+    fn acquisition_software_emitted_as_second_software_entry_when_present() {
+        let mut src = ToySource::new();
+        src.acquisition_software_name = Some("Xcalibur".into());
+        src.acquisition_software_version = Some("4.4.16.14".into());
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<softwareList count="2">"#));
+        assert!(s.contains(r#"<software id="acquisition_software" version="4.4.16.14">"#));
+        assert!(s.contains(
+            r#"<cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="Xcalibur"/>"#
+        ));
+        // Also on the indexed path.
+        let mut buf = Vec::new();
+        write_indexed_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<software id="acquisition_software" version="4.4.16.14">"#));
+    }
+
+    #[test]
+    fn acquisition_software_omitted_when_absent() {
+        let mut src = ToySource::new();
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<softwareList count="1">"#));
+        assert!(!s.contains("acquisition_software"));
+    }
+
+    #[test]
+    fn acquisition_software_version_defaults_to_empty_string_when_absent() {
+        let mut src = ToySource::new();
+        src.acquisition_software_name = Some("MassHunter".into());
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<software id="acquisition_software" version="">"#));
+    }
+
+    fn is_ncname(s: &str) -> bool {
+        let mut chars = s.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    }
+
+    #[test]
+    fn run_id_is_a_valid_ncname() {
+        let meta = |name: &str| RunMetadata {
+            source_file_name: name.into(),
+            ..ToySource::new().run_metadata()
+        };
+        assert_eq!(run_id(&meta("toy.raw")), "toy.raw");
+        assert_eq!(run_id(&meta("_x.d")), "_x.d");
+        assert_eq!(
+            run_id(&meta("20260101_sample.raw")),
+            "run_20260101_sample.raw"
+        );
+        assert_eq!(run_id(&meta("my run (1).wiff")), "my_run__1_.wiff");
+        assert_eq!(run_id(&meta("-a")), "run_-a");
+        assert_eq!(run_id(&meta("")), "run_");
+        assert_eq!(run_id(&meta("dp1")), "run_dp1");
+        assert_eq!(run_id(&meta("IC2")), "run_IC2");
+        assert_eq!(run_id(&meta("toy")), "run_toy");
+        for name in ["0.raw", "a b", "\u{e9}t\u{e9}.raw", "a:b", ""] {
+            let id = run_id(&meta(name));
+            assert!(is_ncname(&id), "{name:?} -> {id:?}");
+        }
+    }
+
+    #[test]
+    fn run_id_uses_sanitized_name_for_digit_leading_file() {
+        let mut src = ToySource::new();
+        src.source_file_name = "2026 sample.raw".into();
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<run id="run_2026_sample.raw" "#));
+        // sourceFile name keeps the original, unsanitized file name.
+        assert!(s.contains(r#"<sourceFile id="sf1" name="2026 sample.raw""#));
+    }
+
+    #[test]
     fn no_extra_instrument_configurations_when_analyzers_empty() {
         let mut src = ToySource::new();
         let mut buf = Vec::new();
@@ -1288,7 +1470,7 @@ mod tests {
     #[test]
     fn additional_processing_steps_appended_in_order_after_conversion_step() {
         let mut src = ToySource::new();
-        src.extra_processing = vec![("MS:1000035", "peak picking"), ("MS:1001485", "smoothing")];
+        src.extra_processing = vec![("MS:1000035", "peak picking"), ("MS:1000592", "smoothing")];
         let mut buf = Vec::new();
         write_mzml(&mut src, &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
@@ -1303,7 +1485,7 @@ mod tests {
             r#"<cvParam cvRef="MS" accession="MS:1000035" name="peak picking" value=""/>"#
         ));
         assert!(
-            s.contains(r#"<cvParam cvRef="MS" accession="MS:1001485" name="smoothing" value=""/>"#)
+            s.contains(r#"<cvParam cvRef="MS" accession="MS:1000592" name="smoothing" value=""/>"#)
         );
     }
 
@@ -1413,6 +1595,64 @@ mod tests {
         assert!(!s.contains("MS:1002954"));
     }
 
+    fn ms2_with(activation: Option<Activation>, nce: Option<f64>) -> String {
+        let mut src = ToySource::new();
+        src.spectra = vec![SpectrumRecord {
+            ms_level: 2,
+            precursor: Some(crate::types::PrecursorInfo {
+                selected_mz: Some(500.5),
+                activation,
+                collision_energy: nce,
+                ce_is_nce: nce.is_some(),
+                ..Default::default()
+            }),
+            ..minimal_spectrum(0, None)
+        }];
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn activation_block(xml: &str) -> &str {
+        let start = xml.find("<activation>").unwrap();
+        let end = xml.find("</activation>").unwrap();
+        &xml[start..end]
+    }
+
+    #[test]
+    fn normalized_collision_energy_uses_ms_1000138_with_percent_unit() {
+        let s = ms2_with(Some(Activation::HCD), Some(30.0));
+        assert!(s.contains(
+            r#"<cvParam cvRef="MS" accession="MS:1000138" name="normalized collision energy" value="30.00" unitCvRef="UO" unitAccession="UO:0000187" unitName="percent"/>"#
+        ));
+        assert!(!s.contains("MS:1002013"));
+    }
+
+    #[test]
+    fn unknown_activation_emits_no_dissociation_method() {
+        let s = ms2_with(None, None);
+        let block = activation_block(&s);
+        assert!(!block.contains("cvParam"), "{block}");
+    }
+
+    #[test]
+    fn activation_terms_match_psi_ms() {
+        let cases: &[(Activation, &[&str])] = &[
+            (Activation::SID, &["MS:1000136"]),
+            (Activation::MPID, &["MS:1000435"]),
+            (Activation::EThcD, &["MS:1000598", "MS:1002631"]),
+            (Activation::PD, &[]),
+        ];
+        for (act, expected) in cases {
+            let s = ms2_with(Some(*act), None);
+            let block = activation_block(&s);
+            assert_eq!(block.matches("<cvParam").count(), expected.len(), "{act:?}");
+            for acc in *expected {
+                assert!(block.contains(acc), "{act:?} missing {acc}");
+            }
+        }
+    }
+
     #[test]
     fn chromatogram_list_omitted_when_source_yields_none() {
         let mut src = ToySource::new();
@@ -1471,6 +1711,46 @@ mod tests {
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains(r#"<indexList count="1">"#));
         assert!(!s.contains(r#"<index name="chromatogram">"#));
+    }
+
+    #[test]
+    fn index_offsets_point_at_element_open_tags() {
+        let mut src = ToySource::new();
+        src.spectra.push(SpectrumRecord {
+            native_id: "controllerType=0 controllerNumber=1 scan=2".into(),
+            ..minimal_spectrum(1, None)
+        });
+        src.chroms = vec![tic_chromatogram(0), srm_chromatogram(1)];
+        let mut buf = Vec::new();
+        write_indexed_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+
+        let mut checked = 0;
+        for line in s.lines() {
+            let Some(rest) = line.trim().strip_prefix("<offset idRef=\"") else {
+                continue;
+            };
+            let (id, rest) = rest.split_once('"').unwrap();
+            let offset: usize = rest
+                .trim_start_matches('>')
+                .trim_end_matches("</offset>")
+                .parse()
+                .unwrap();
+            let tail = &s[offset..];
+            assert!(
+                tail.starts_with(&format!("<spectrum id=\"{id}\""))
+                    || tail.starts_with(&format!("<chromatogram id=\"{id}\"")),
+                "offset {offset} for {id:?} points at {:?}",
+                &tail[..20.min(tail.len())]
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 4);
+
+        let start = s.find("<indexListOffset>").unwrap() + "<indexListOffset>".len();
+        let end = s.find("</indexListOffset>").unwrap();
+        let offset: usize = s[start..end].parse().unwrap();
+        assert!(s[offset..].starts_with("<indexList "));
     }
 
     // ---------- compression (issue #8) --------------------------------
