@@ -19,6 +19,10 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 - mzML writer: when a precursor's activation is unknown, and for chromatogram
   precursors, `<activation>` no longer defaults to CID; it carries no
   dissociation-method term.
+- mzML writer: restored the acquisition-software `<software>` entry
+  (`id="acquisition_software"`) documented in 1.4.0. It was dropped by the
+  zlib compression change, so `RunMetadata::acquisition_software_name` was
+  silently ignored.
 
 ## [2.0.0] - 2026-09-27
 

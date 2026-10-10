@@ -417,6 +417,9 @@ pub fn write_indexed_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>
 
 // ---------- prologue / spectrum body ---------------------------------------
 
+/// Fixed `xs:ID` of the acquisition-software `<software>` entry.
+const ACQUISITION_SOFTWARE_ID: &str = "acquisition_software";
+
 fn write_prologue<W: Write>(
     out: &mut W,
     meta: &RunMetadata,
@@ -489,7 +492,11 @@ fn write_prologue<W: Write>(
     writeln!(out, r#"    </sourceFileList>"#)?;
     writeln!(out, r#"  </fileDescription>"#)?;
 
-    writeln!(out, r#"  <softwareList count="1">"#)?;
+    writeln!(
+        out,
+        r#"  <softwareList count="{}">"#,
+        1 + usize::from(meta.acquisition_software_name.is_some())
+    )?;
     writeln!(
         out,
         r#"    <software id="{}" version="{}">"#,
@@ -502,6 +509,28 @@ fn write_prologue<W: Write>(
         escape(&meta.software_name)
     )?;
     writeln!(out, r#"    </software>"#)?;
+    if let Some(name) = &meta.acquisition_software_name {
+        // A fixed id (rather than one derived from `name`) because `name`
+        // comes from vendor metadata and is not guaranteed to be a valid
+        // XML `xs:ID` (e.g. "Xcalibur 4.4" contains a space). No
+        // `processingMethod` references this software, so a fixed id has no
+        // downstream effect.
+        writeln!(
+            out,
+            r#"    <software id="{ACQUISITION_SOFTWARE_ID}" version="{}">"#,
+            escape(meta.acquisition_software_version.as_deref().unwrap_or(""))
+        )?;
+        // Vendor acquisition software each has its own PSI-MS term, but
+        // mapping vendor-reported names to accessions would need every
+        // string verified against the CV, so use the generic term and keep
+        // the real name as the value.
+        writeln!(
+            out,
+            r#"      <cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="{}"/>"#,
+            escape(name)
+        )?;
+        writeln!(out, r#"    </software>"#)?;
+    }
     writeln!(out, r#"  </softwareList>"#)?;
 
     writeln!(
@@ -1129,6 +1158,8 @@ mod tests {
     struct ToySource {
         start_timestamp: Option<String>,
         instrument_serial_number: Option<String>,
+        acquisition_software_name: Option<String>,
+        acquisition_software_version: Option<String>,
         analyzers: Vec<Analyzer>,
         extra: std::collections::BTreeMap<String, String>,
         spectra: Vec<SpectrumRecord>,
@@ -1141,6 +1172,8 @@ mod tests {
             Self {
                 start_timestamp: None,
                 instrument_serial_number: None,
+                acquisition_software_name: None,
+                acquisition_software_version: None,
                 analyzers: Vec::new(),
                 extra: Default::default(),
                 spectra: vec![minimal_spectrum(0, None)],
@@ -1158,8 +1191,8 @@ mod tests {
                 native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
                 instrument: CvTerm::new("MS:1001911", "Q Exactive"),
                 instrument_serial_number: self.instrument_serial_number.clone(),
-                acquisition_software_name: None,
-                acquisition_software_version: None,
+                acquisition_software_name: self.acquisition_software_name.clone(),
+                acquisition_software_version: self.acquisition_software_version.clone(),
                 software_name: "toy".into(),
                 software_version: "0.0.0".into(),
                 start_timestamp: self.start_timestamp.clone(),
@@ -1281,6 +1314,46 @@ mod tests {
         write_mzml(&mut src, &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(!s.contains("MS:1000529"));
+    }
+
+    #[test]
+    fn acquisition_software_emitted_as_second_software_entry_when_present() {
+        let mut src = ToySource::new();
+        src.acquisition_software_name = Some("Xcalibur".into());
+        src.acquisition_software_version = Some("4.4.16.14".into());
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<softwareList count="2">"#));
+        assert!(s.contains(r#"<software id="acquisition_software" version="4.4.16.14">"#));
+        assert!(s.contains(
+            r#"<cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="Xcalibur"/>"#
+        ));
+        // Also on the indexed path.
+        let mut buf = Vec::new();
+        write_indexed_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<software id="acquisition_software" version="4.4.16.14">"#));
+    }
+
+    #[test]
+    fn acquisition_software_omitted_when_absent() {
+        let mut src = ToySource::new();
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<softwareList count="1">"#));
+        assert!(!s.contains("acquisition_software"));
+    }
+
+    #[test]
+    fn acquisition_software_version_defaults_to_empty_string_when_absent() {
+        let mut src = ToySource::new();
+        src.acquisition_software_name = Some("MassHunter".into());
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<software id="acquisition_software" version="">"#));
     }
 
     #[test]
