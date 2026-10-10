@@ -294,6 +294,7 @@ pub fn write_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>(
 
     write_prologue(out, &meta, count, false, &extra_processing)?;
     for rec in src.iter_spectra() {
+        out.write_all(RECORD_INDENT.as_bytes())?;
         write_spectrum(out, &rec, mobility_kind, &analyzer_ic_ids, compression)?;
     }
     writeln!(out, r#"    </spectrumList>"#)?;
@@ -306,6 +307,7 @@ pub fn write_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>(
             chroms.len()
         )?;
         for rec in &chroms {
+            out.write_all(RECORD_INDENT.as_bytes())?;
             write_chromatogram(out, rec, compression)?;
         }
         writeln!(out, r#"    </chromatogramList>"#)?;
@@ -332,8 +334,9 @@ pub fn write_indexed_mzml<S: SpectrumSource + ?Sized, W: Write>(
 /// [`Compression`].
 ///
 /// The `<fileChecksum>` SHA-1 is computed over the bytes actually written to
-/// `out` (via the internal counting/hashing writer), so it covers whichever
-/// codec produced the `<binary>` payloads with no separate handling needed.
+/// `out`, from the start of the document up to and including the
+/// `<fileChecksum>` open tag, as mzML 1.1 specifies. Each `<offset>` and the
+/// `<indexListOffset>` give the byte position of the element's `<`.
 pub fn write_indexed_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>(
     src: &mut S,
     out: &mut W,
@@ -350,6 +353,8 @@ pub fn write_indexed_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>
 
     let mut offsets: Vec<(String, u64)> = Vec::with_capacity(count);
     for rec in src.iter_spectra() {
+        // Offsets point at the element's `<`, so write the indent first.
+        cw.write_all(RECORD_INDENT.as_bytes())?;
         offsets.push((rec.native_id.clone(), cw.pos));
         write_spectrum(&mut cw, &rec, mobility_kind, &analyzer_ic_ids, compression)?;
     }
@@ -365,6 +370,7 @@ pub fn write_indexed_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>
             chroms.len()
         )?;
         for rec in &chroms {
+            cw.write_all(RECORD_INDENT.as_bytes())?;
             chrom_offsets.push((rec.id.clone(), cw.pos));
             write_chromatogram(&mut cw, rec, compression)?;
         }
@@ -374,9 +380,10 @@ pub fn write_indexed_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>
     writeln!(cw, r#"  </run>"#)?;
     writeln!(cw, r#"  </mzML>"#)?;
 
+    cw.write_all(b"  ")?;
     let index_list_offset = cw.pos;
     let n_indexes = 1 + usize::from(!chrom_offsets.is_empty());
-    writeln!(cw, r#"  <indexList count="{n_indexes}">"#)?;
+    writeln!(cw, r#"<indexList count="{n_indexes}">"#)?;
     writeln!(cw, r#"    <index name="spectrum">"#)?;
     for (id, offset) in &offsets {
         writeln!(
@@ -401,21 +408,28 @@ pub fn write_indexed_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>
     }
     writeln!(cw, r#"  </indexList>"#)?;
 
-    cw.hashing = false;
-    let digest = std::mem::replace(&mut cw.sha1, Sha1::new()).finalize();
-    let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-
     writeln!(
         cw,
         r#"  <indexListOffset>{}</indexListOffset>"#,
         index_list_offset
     )?;
-    writeln!(cw, r#"  <fileChecksum>{}</fileChecksum>"#, hex)?;
+    // mzML 1.1: the SHA-1 covers the file from the start up to and
+    // including the `<fileChecksum>` open tag (as pwiz and mzdata do).
+    write!(cw, r#"  <fileChecksum>"#)?;
+    cw.hashing = false;
+    let digest = std::mem::replace(&mut cw.sha1, Sha1::new()).finalize();
+    let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+    writeln!(cw, r#"{}</fileChecksum>"#, hex)?;
     writeln!(cw, r#"</indexedmzML>"#)?;
     Ok(())
 }
 
 // ---------- prologue / spectrum body ---------------------------------------
+
+/// Indent in front of each `<spectrum>`/`<chromatogram>` open tag. Callers
+/// write it before calling [`write_spectrum`]/[`write_chromatogram`] so the
+/// indexed writer can record offsets that point at the element's `<`.
+const RECORD_INDENT: &str = "      ";
 
 /// Fixed `xs:ID` of the acquisition-software `<software>` entry.
 const ACQUISITION_SOFTWARE_ID: &str = "acquisition_software";
@@ -713,7 +727,7 @@ fn write_spectrum<W: Write>(
     });
     writeln!(
         out,
-        r#"      <spectrum id="{sid}" index="{idx}" defaultArrayLength="{n}">"#,
+        r#"<spectrum id="{sid}" index="{idx}" defaultArrayLength="{n}">"#,
         sid = escape(&rec.native_id),
         idx = rec.index,
         n = n_peaks
@@ -1076,7 +1090,7 @@ fn write_chromatogram<W: Write>(
 
     writeln!(
         out,
-        r#"      <chromatogram id="{id}" index="{idx}" defaultArrayLength="{n}">"#,
+        r#"<chromatogram id="{id}" index="{idx}" defaultArrayLength="{n}">"#,
         id = escape(&rec.id),
         idx = rec.index,
     )?;
@@ -1701,6 +1715,46 @@ mod tests {
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains(r#"<indexList count="1">"#));
         assert!(!s.contains(r#"<index name="chromatogram">"#));
+    }
+
+    #[test]
+    fn index_offsets_point_at_element_open_tags() {
+        let mut src = ToySource::new();
+        src.spectra.push(SpectrumRecord {
+            native_id: "controllerType=0 controllerNumber=1 scan=2".into(),
+            ..minimal_spectrum(1, None)
+        });
+        src.chroms = vec![tic_chromatogram(0), srm_chromatogram(1)];
+        let mut buf = Vec::new();
+        write_indexed_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+
+        let mut checked = 0;
+        for line in s.lines() {
+            let Some(rest) = line.trim().strip_prefix("<offset idRef=\"") else {
+                continue;
+            };
+            let (id, rest) = rest.split_once('"').unwrap();
+            let offset: usize = rest
+                .trim_start_matches('>')
+                .trim_end_matches("</offset>")
+                .parse()
+                .unwrap();
+            let tail = &s[offset..];
+            assert!(
+                tail.starts_with(&format!("<spectrum id=\"{id}\""))
+                    || tail.starts_with(&format!("<chromatogram id=\"{id}\"")),
+                "offset {offset} for {id:?} points at {:?}",
+                &tail[..20.min(tail.len())]
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 4);
+
+        let start = s.find("<indexListOffset>").unwrap() + "<indexListOffset>".len();
+        let end = s.find("</indexListOffset>").unwrap();
+        let offset: usize = s[start..end].parse().unwrap();
+        assert!(s[offset..].starts_with("<indexList "));
     }
 
     // ---------- compression (issue #8) --------------------------------

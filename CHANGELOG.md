@@ -27,6 +27,12 @@ crate adheres to [Semantic Versioning](https://semver.org/).
   name, so names starting with a digit or containing spaces failed XSD
   validation. Invalid characters become `_`, and a `run_` prefix is added
   when needed. Names that were already valid are unchanged.
+- Indexed mzML: `<fileChecksum>` now covers the document up to and including
+  the `<fileChecksum>` open tag, as the mzML 1.1 specification requires. It
+  stopped after `</indexList>`, so a reader that verifies the checksum would
+  report a mismatch.
+- Indexed mzML: `<offset>` and `<indexListOffset>` values now point at the
+  element's `<` rather than at the leading indentation.
 
 ## [2.0.0] - 2026-09-27
 
