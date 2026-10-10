@@ -283,8 +283,8 @@ pub struct RunMetadata {
     /// [`SpectrumRecord::analyzer`](crate::types::SpectrumRecord::analyzer)
     /// matches one of these gets an `instrumentConfigurationRef` pointing at
     /// it, so hybrid instruments (e.g. quad/ion-trap MS2 vs Orbitrap MS1 on
-    /// a Fusion) preserve per-scan analyzer identity. Leave empty to keep
-    /// the previous single-`IC1`-for-everything behavior.
+    /// a Fusion) preserve per-scan analyzer identity. When empty, every
+    /// spectrum references the single default `IC1`.
     pub analyzers: Vec<Analyzer>,
     /// Namespaced reader-specific values. Keys use `<reader>.<field>`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

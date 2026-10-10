@@ -8,11 +8,9 @@
 //! chromatogram time/intensity) are zlib-compressed (`MS:1000574`) by
 //! default, matching msconvert/OpenMS output; use
 //! [`write_mzml_with_compression`]/[`write_indexed_mzml_with_compression`]
-//! to opt back into the uncompressed (`MS:1000576`) layout the writer used
-//! before 1.4.
+//! to write uncompressed (`MS:1000576`) arrays instead.
 //!
-//! The implementation here is the vendor-neutral lift of the writer that
-//! originally lived in `opentfraw::mzml`. All vendor-specific decisions (the
+//! The writer is vendor-neutral. All vendor-specific decisions (the
 //! source-file CV term, the native-ID format CV term, the instrument CV term,
 //! the per-scan `native_id` strings) come from the source's
 //! [`RunMetadata`](crate::RunMetadata) and from each
@@ -261,8 +259,8 @@ fn activation_cv(act: Activation, analyzer: Option<Analyzer>) -> &'static [CvPai
         Activation::ECD => &[("MS:1000250", "electron capture dissociation")],
         Activation::IRMPD => &[("MS:1000262", "infrared multiphoton dissociation")],
         // "Proton transfer decay / activated-ion" has no matching PSI-MS
-        // dissociation term (MS:1001880 in-source CID, used before 2.0.1,
-        // describes something else entirely), so emit nothing.
+        // dissociation term (MS:1001880 in-source CID describes something
+        // else entirely), so emit nothing.
         Activation::PD => &[],
         Activation::PQD => &[("MS:1000599", "pulsed q dissociation")],
         Activation::UVPD => &[("MS:1003246", "ultraviolet photodissociation")],

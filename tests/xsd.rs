@@ -2,7 +2,7 @@
 //! `xmllint`, covering shapes the CI `validate-mzml` example does not: a
 //! digit-leading source file name (the `<run id>` is an `xs:ID`), an MS2
 //! precursor with unknown activation, and an SRM chromatogram precursor
-//! (both of which now write an empty `<activation>`).
+//! (both of which write an empty `<activation>`).
 //!
 //! Skips with a message when `xmllint` is not installed.
 

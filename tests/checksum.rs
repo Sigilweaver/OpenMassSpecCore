@@ -6,16 +6,14 @@
 //! dependency just for this one footer. That implementation has its own
 //! unit tests against NIST vectors in `src/mzml.rs`, but nothing exercised
 //! the actual code path that feeds a generated document's bytes through it.
-//! This test closes that gap: it generates a small indexed-mzML document
+//! This test covers that path: it generates a small indexed-mzML document
 //! through the public API, recomputes SHA-1 over the same bytes with a
 //! second, independent implementation written here, and asserts the two
 //! agree.
 //!
 //! Scope: per the mzML 1.1 specification, the digest covers the document
 //! from its first byte up to and including the `<fileChecksum>` open tag
-//! (the same scope ProteoWizard and mzdata use). Before 2.0.1 the writer
-//! stopped after `</indexList>`, so checksum-verifying readers rejected
-//! its files.
+//! (the same scope ProteoWizard and mzdata use).
 
 use openmassspec_core::{
     write_indexed_mzml, CvTerm, Polarity, RunMetadata, ScanMode, SpectrumRecord, SpectrumSource,
