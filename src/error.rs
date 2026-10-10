@@ -1,16 +1,21 @@
 //! Aggregate error type for the OpenMassSpec stack.
 //!
-//! Each vendor crate defines its own narrow `Error` enum. When code needs to
-//! handle errors from multiple vendors uniformly - the umbrella `openmassspec-io`
-//! crate, the `vendor2mzml` CLI, SpecLance ingest - it converts those into
-//! [`Error`] (this aggregate). Downstream users get a single error vocabulary
-//! and `?`-propagates cleanly across vendor boundaries.
+//! Each vendor crate defines its own narrow `Error` enum. Code that handles
+//! errors from several vendors uniformly (the umbrella `openmassspec-io`
+//! crate, the `vendor2mzml` CLI, the mzML writer in this crate) works with
+//! [`Error`]: a [`SpectrumSource`](crate::SpectrumSource) yields
+//! `Result<_, Error>` items, and vendor errors travel inside
+//! [`Error::Vendor`].
 
 use std::io;
 
-/// Stack-wide error type. Vendor errors are erased into a boxed trait object
-/// so this enum stays version-stable as vendor crates evolve.
+/// Stack-wide error type.
+///
+/// Vendor errors are erased into a boxed trait object so this enum does not
+/// change as vendor crates evolve. The enum is `#[non_exhaustive]`; match it
+/// with a wildcard arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// I/O failure (file not found, permission denied, short read, ...).
     #[error("I/O error: {0}")]
@@ -36,6 +41,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
     /// Wrap a vendor-crate error into [`Error::Vendor`].
+    ///
+    /// Usable directly as a `map_err` argument:
+    /// `decode(scan).map_err(Error::vendor)`.
     pub fn vendor<E>(err: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,

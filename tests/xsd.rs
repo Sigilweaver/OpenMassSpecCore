@@ -1,8 +1,10 @@
 //! Validates writer output against the vendored PSI-MS mzML XSDs with
 //! `xmllint`, covering shapes the CI `validate-mzml` example does not: a
-//! digit-leading source file name (the `<run id>` is an `xs:ID`), an MS2
-//! precursor with unknown activation, and an SRM chromatogram precursor
-//! (both of which write an empty `<activation>`).
+//! digit-leading source file name (the `<run id>` is an `xs:ID`), a software
+//! name that is not an NCName (the `<software id>` is an `xs:ID`), an MS2
+//! precursor with unknown activation, an SRM chromatogram precursor (both of
+//! which write an empty `<activation>`), and a document written with skipped
+//! records.
 //!
 //! Skips with a message when `xmllint` is not installed.
 
@@ -10,88 +12,73 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use openmassspec_core::{
-    write_indexed_mzml, write_mzml, ChromatogramRecord, CvTerm, Polarity, PrecursorInfo,
-    RunMetadata, ScanMode, SpectrumRecord, SpectrumSource,
+    write_indexed_mzml, write_indexed_mzml_with_options, write_mzml, write_mzml_with_options,
+    ChromatogramIter, ChromatogramRecord, CvTerm, Error, Polarity, PrecursorInfo,
+    RecordErrorPolicy, RunMetadata, ScanMode, SpectrumIter, SpectrumRecord, SpectrumSource,
+    WriteOptions,
 };
 
 struct Source {
     meta: RunMetadata,
     spectra: Vec<SpectrumRecord>,
     chroms: Vec<ChromatogramRecord>,
+    /// Yield an `Err` between the spectra.
+    with_error: bool,
 }
 
 fn spectrum(index: usize, ms_level: u32, precursor: Option<PrecursorInfo>) -> SpectrumRecord {
-    SpectrumRecord {
+    SpectrumRecord::new(
         index,
-        scan_number: index as u32 + 1,
-        native_id: format!("controllerType=0 controllerNumber=1 scan={}", index + 1),
-        ms_level,
-        polarity: Some(Polarity::Positive),
-        scan_mode: Some(ScanMode::Centroid),
-        analyzer: None,
-        acquisition_event_id: None,
-        filter: None,
-        retention_time_sec: index as f64,
-        total_ion_current: None,
-        base_peak_mz: None,
-        base_peak_intensity: None,
-        low_mz: None,
-        high_mz: None,
-        ion_injection_time_ms: None,
-        inv_mobility: None,
-        faims_cv: None,
-        precursor,
-        mz: vec![100.0, 200.0],
-        intensity: vec![1.0, 2.0],
-        inv_mobility_per_peak: None,
-        extra: Default::default(),
-    }
+        index as u32 + 1,
+        format!("controllerType=0 controllerNumber=1 scan={}", index + 1),
+    )
+    .with_ms_level(ms_level)
+    .with_polarity(Polarity::Positive)
+    .with_scan_mode(ScanMode::Centroid)
+    .with_retention_time_sec(index as f64)
+    .with_precursor(precursor)
+    .with_peaks(vec![100.0, 200.0], vec![1.0, 2.0])
 }
 
 impl Source {
-    fn new(source_file_name: &str) -> Self {
+    fn new(source_file_name: &str, software_name: &str) -> Self {
         Self {
-            meta: RunMetadata {
-                source_file_name: source_file_name.into(),
-                source_file_format: CvTerm::new("MS:1000563", "Thermo RAW format"),
-                native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
-                instrument: CvTerm::new("MS:1001911", "Q Exactive"),
-                instrument_serial_number: None,
-                acquisition_software_name: Some("Xcalibur".into()),
-                acquisition_software_version: Some("4.4".into()),
-                software_name: "xsd-test".into(),
-                software_version: "0.0.0".into(),
-                start_timestamp: None,
-                mobility_array_kind: None,
-                analyzers: Vec::new(),
-                extra: Default::default(),
-            },
+            meta: RunMetadata::new(
+                source_file_name,
+                CvTerm::new("MS:1000563", "Thermo RAW format"),
+                CvTerm::new("MS:1000768", "Thermo nativeID format"),
+                CvTerm::new("MS:1001911", "Q Exactive"),
+                software_name,
+                "0.0.0",
+            )
+            .with_acquisition_software_name("Xcalibur".to_string())
+            .with_acquisition_software_version("4.4".to_string()),
             spectra: vec![
                 spectrum(0, 1, None),
                 spectrum(
                     1,
                     2,
-                    Some(PrecursorInfo {
-                        selected_mz: Some(150.0),
-                        collision_energy: Some(30.0),
-                        ce_is_nce: true,
-                        activation: None,
-                        ..Default::default()
-                    }),
+                    Some(
+                        PrecursorInfo::default()
+                            .with_selected_mz(150.0)
+                            .with_collision_energy(30.0)
+                            .with_ce_is_nce(true),
+                    ),
                 ),
             ],
-            chroms: vec![ChromatogramRecord {
-                index: 0,
-                id: "SRM SIC Q1=524.3 Q3=136.1".into(),
-                chromatogram_type: Some(CvTerm::new(
-                    "MS:1001473",
-                    "selected reaction monitoring chromatogram",
-                )),
-                precursor_mz: Some(524.3),
-                product_mz: Some(136.1),
-                time_sec: vec![0.0, 30.0],
-                intensity: vec![5.0, 8.0],
-            }],
+            chroms: vec![ChromatogramRecord::new(
+                0,
+                "SRM SIC Q1=524.3 Q3=136.1",
+                vec![0.0, 30.0],
+                vec![5.0, 8.0],
+            )
+            .with_chromatogram_type(CvTerm::new(
+                "MS:1001473",
+                "selected reaction monitoring chromatogram",
+            ))
+            .with_precursor_mz(524.3)
+            .with_product_mz(136.1)],
+            with_error: false,
         }
     }
 }
@@ -100,11 +87,16 @@ impl SpectrumSource for Source {
     fn run_metadata(&self) -> RunMetadata {
         self.meta.clone()
     }
-    fn iter_spectra<'a>(&'a mut self) -> Box<dyn Iterator<Item = SpectrumRecord> + 'a> {
-        Box::new(self.spectra.clone().into_iter())
+    fn iter_spectra<'a>(&'a mut self) -> SpectrumIter<'a> {
+        let error = self
+            .with_error
+            .then(|| Err(Error::Format("corrupt scan".into())));
+        let mut spectra = self.spectra.iter().cloned().map(Ok);
+        let first = spectra.next();
+        Box::new(first.into_iter().chain(error).chain(spectra))
     }
-    fn iter_chromatograms<'a>(&'a mut self) -> Box<dyn Iterator<Item = ChromatogramRecord> + 'a> {
-        Box::new(self.chroms.clone().into_iter())
+    fn iter_chromatograms<'a>(&'a mut self) -> ChromatogramIter<'a> {
+        Box::new(self.chroms.clone().into_iter().map(Ok))
     }
     fn spectrum_count_hint(&self) -> Option<usize> {
         Some(self.spectra.len())
@@ -140,13 +132,18 @@ fn validate(doc: &[u8], schema: &str, name: &str) {
 }
 
 #[test]
-fn digit_leading_file_name_validates_against_xsd() {
+fn awkward_file_and_software_names_validate_against_xsd() {
     if !xmllint_available() {
         eprintln!("skipping: xmllint not installed");
         return;
     }
-    for name in ["20260101_sample.raw", "1 run (copy).raw"] {
-        let mut src = Source::new(name);
+    for (file, software) in [
+        ("20260101_sample.raw", "xsd-test"),
+        ("1 run (copy).raw", "1 reader & co"),
+        ("same", "same"),
+        ("acquisition_software", "acquisition_software"),
+    ] {
+        let mut src = Source::new(file, software);
 
         let mut plain = Vec::new();
         write_mzml(&mut src, &mut plain).unwrap();
@@ -156,4 +153,24 @@ fn digit_leading_file_name_validates_against_xsd() {
         write_indexed_mzml(&mut src, &mut indexed).unwrap();
         validate(&indexed, "mzML1.1.2_idx.xsd", "xsd_indexed.mzML");
     }
+}
+
+#[test]
+fn document_with_skipped_records_validates_against_xsd() {
+    if !xmllint_available() {
+        eprintln!("skipping: xmllint not installed");
+        return;
+    }
+    let mut src = Source::new("skip.raw", "xsd-test");
+    src.with_error = true;
+    let opts = WriteOptions::new().with_record_error_policy(RecordErrorPolicy::Skip);
+
+    let mut plain = Vec::new();
+    let summary = write_mzml_with_options(&mut src, &mut plain, &opts).unwrap();
+    assert_eq!(summary.spectra_skipped, 1);
+    validate(&plain, "mzML1.1.0.xsd", "xsd_skip_plain.mzML");
+
+    let mut indexed = Vec::new();
+    write_indexed_mzml_with_options(&mut src, &mut indexed, &opts).unwrap();
+    validate(&indexed, "mzML1.1.2_idx.xsd", "xsd_skip_indexed.mzML");
 }

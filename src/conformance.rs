@@ -37,35 +37,55 @@ use crate::types::SpectrumRecord;
 const FLOAT_REL_TOL: f64 = 1e-4;
 
 /// Failure modes detected by [`assert_source_invariants`].
+///
+/// The enum and each variant are `#[non_exhaustive]`; match with `{ .. }`
+/// patterns and a wildcard arm. Field names say what they hold: the
+/// offending spectrum's `native_id`, the value the parser declared, and the
+/// value computed from the arrays.
 #[derive(Debug)]
+#[non_exhaustive]
+#[allow(missing_docs)]
 pub enum ConformanceError {
+    /// The source yielded `Err` instead of a spectrum. `position` is the
+    /// zero-based position in the stream.
+    #[non_exhaustive]
+    Source {
+        position: usize,
+        error: crate::Error,
+    },
     /// `mz` / `intensity` arrays have mismatched lengths.
+    #[non_exhaustive]
     PeakArrayLengthMismatch {
         native_id: String,
         mz_len: usize,
         intensity_len: usize,
     },
     /// `inv_mobility_per_peak.len()` did not match `mz.len()`.
+    #[non_exhaustive]
     MobilityArrayLengthMismatch {
         native_id: String,
         mz_len: usize,
         mobility_len: usize,
     },
     /// `total_ion_current` did not match `sum(intensity)` within tolerance.
+    #[non_exhaustive]
     TicMismatch {
         native_id: String,
         declared: f64,
         computed: f64,
     },
     /// `base_peak_intensity` did not match `max(intensity)` within tolerance.
+    #[non_exhaustive]
     BasePeakIntensityMismatch {
         native_id: String,
         declared: f64,
         computed: f64,
     },
     /// MS2+ spectrum was missing precursor info.
+    #[non_exhaustive]
     MissingPrecursor { native_id: String, ms_level: u32 },
     /// Retention time went backwards within one acquisition stream.
+    #[non_exhaustive]
     RetentionTimeNonMonotonic {
         prefix: String,
         previous: f64,
@@ -73,18 +93,23 @@ pub enum ConformanceError {
         native_id: String,
     },
     /// Spectrum index sequence was not strictly increasing or did not start at 0.
+    #[non_exhaustive]
     IndexSequence {
         native_id: String,
         previous: Option<usize>,
         current: usize,
     },
     /// Spectrum had no peaks at all.
+    #[non_exhaustive]
     EmptySpectrum { native_id: String },
 }
 
 impl std::fmt::Display for ConformanceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Source { position, error } => {
+                write!(f, "source error at stream position {position}: {error}")
+            }
             Self::PeakArrayLengthMismatch {
                 native_id,
                 mz_len,
@@ -145,7 +170,14 @@ impl std::fmt::Display for ConformanceError {
     }
 }
 
-impl std::error::Error for ConformanceError {}
+impl std::error::Error for ConformanceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Source { error, .. } => Some(error),
+            _ => None,
+        }
+    }
+}
 
 fn rel_close(a: f64, b: f64, tol: f64) -> bool {
     let scale = a.abs().max(b.abs()).max(1.0);
@@ -170,21 +202,34 @@ fn rt_stream_key(native_id: &str) -> String {
 /// failure encountered, or `Ok(spectrum_count)` if every spectrum passed.
 ///
 /// The source is iterated to completion on success; on failure iteration
-/// stops at the offending spectrum.
-pub fn assert_source_invariants<S: SpectrumSource>(src: &mut S) -> Result<usize, ConformanceError> {
-    assert_iter_invariants(src.iter_spectra())
+/// stops at the offending spectrum. An `Err` item from the source fails the
+/// check as [`ConformanceError::Source`].
+pub fn assert_source_invariants<S: SpectrumSource + ?Sized>(
+    src: &mut S,
+) -> Result<usize, ConformanceError> {
+    check_stream(
+        src.iter_spectra().enumerate().map(|(position, item)| {
+            item.map_err(|error| ConformanceError::Source { position, error })
+        }),
+    )
 }
 
-/// Run the invariant suite against any iterator yielding spectra. Useful
-/// for vendors whose top-level mzML writer does not yet implement
-/// [`SpectrumSource`].
+/// Run the invariant suite against any iterator yielding already-decoded
+/// spectra, e.g. records read back from an mzML file.
 pub fn assert_iter_invariants<I: IntoIterator<Item = SpectrumRecord>>(
     iter: I,
+) -> Result<usize, ConformanceError> {
+    check_stream(iter.into_iter().map(Ok))
+}
+
+fn check_stream(
+    iter: impl Iterator<Item = Result<SpectrumRecord, ConformanceError>>,
 ) -> Result<usize, ConformanceError> {
     let mut last_index: Option<usize> = None;
     let mut last_rt: HashMap<String, f64> = HashMap::new();
     let mut count = 0usize;
     for spectrum in iter {
+        let spectrum = spectrum?;
         check_one(&spectrum, last_index, &mut last_rt)?;
         last_index = Some(spectrum.index);
         count += 1;
@@ -298,38 +343,49 @@ mod tests {
     use crate::types::RunMetadata;
     use crate::{Polarity, PrecursorInfo, SpectrumRecord};
 
-    struct ToySource(Vec<SpectrumRecord>);
+    /// Yields `Err` instead of the spectrum at position `.1`, when set.
+    struct ToySource(Vec<SpectrumRecord>, Option<usize>);
 
     impl SpectrumSource for ToySource {
         fn run_metadata(&self) -> RunMetadata {
-            RunMetadata {
-                source_file_name: "toy".into(),
-                source_file_format: crate::CvTerm {
-                    accession: "MS:1000563",
-                    name: "Thermo RAW format".into(),
-                },
-                native_id_format: crate::CvTerm {
-                    accession: "MS:1000768",
-                    name: "Thermo nativeID format".into(),
-                },
-                instrument: crate::CvTerm {
-                    accession: "MS:1000483",
-                    name: "Thermo Fisher Scientific instrument model".into(),
-                },
-                instrument_serial_number: None,
-                software_name: "test".into(),
-                software_version: "0.0".into(),
-                acquisition_software_name: None,
-                acquisition_software_version: None,
-                start_timestamp: None,
-                mobility_array_kind: None,
-                analyzers: Vec::new(),
-                extra: Default::default(),
-            }
+            RunMetadata::new(
+                "toy",
+                crate::CvTerm::new("MS:1000563", "Thermo RAW format"),
+                crate::CvTerm::new("MS:1000768", "Thermo nativeID format"),
+                crate::CvTerm::new("MS:1000483", "Thermo Fisher Scientific instrument model"),
+                "test",
+                "0.0",
+            )
         }
-        fn iter_spectra<'a>(&'a mut self) -> Box<dyn Iterator<Item = SpectrumRecord> + 'a> {
-            Box::new(self.0.clone().into_iter())
+        fn iter_spectra<'a>(&'a mut self) -> crate::SpectrumIter<'a> {
+            let fail_at = self.1;
+            Box::new(self.0.clone().into_iter().enumerate().map(move |(i, s)| {
+                if Some(i) == fail_at {
+                    Err(crate::Error::Format("bad block".into()))
+                } else {
+                    Ok(s)
+                }
+            }))
         }
+    }
+
+    #[test]
+    fn source_error_fails_conformance() {
+        let mut src = ToySource(vec![ok_spec(0, 1, 1.0), ok_spec(1, 1, 2.0)], Some(1));
+        let err = assert_source_invariants(&mut src).unwrap_err();
+        assert!(
+            matches!(err, ConformanceError::Source { position: 1, .. }),
+            "{err:?}"
+        );
+        assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn iter_invariants_accept_plain_records() {
+        assert_eq!(
+            assert_iter_invariants(vec![ok_spec(0, 1, 1.0), ok_spec(1, 2, 2.0)]).unwrap(),
+            2
+        );
     }
 
     fn ok_spec(index: usize, ms_level: u32, rt: f64) -> SpectrumRecord {
@@ -371,11 +427,10 @@ mod tests {
 
     #[test]
     fn happy_path_passes() {
-        let mut src = ToySource(vec![
-            ok_spec(0, 1, 1.0),
-            ok_spec(1, 2, 2.0),
-            ok_spec(2, 1, 3.0),
-        ]);
+        let mut src = ToySource(
+            vec![ok_spec(0, 1, 1.0), ok_spec(1, 2, 2.0), ok_spec(2, 1, 3.0)],
+            None,
+        );
         assert_eq!(assert_source_invariants(&mut src).unwrap(), 3);
     }
 
@@ -383,7 +438,7 @@ mod tests {
     fn detects_tic_mismatch() {
         let mut s = ok_spec(0, 1, 1.0);
         s.total_ion_current = Some(999.0);
-        let mut src = ToySource(vec![s]);
+        let mut src = ToySource(vec![s], None);
         let err = assert_source_invariants(&mut src).unwrap_err();
         assert!(matches!(err, ConformanceError::TicMismatch { .. }));
     }
@@ -392,7 +447,7 @@ mod tests {
     fn detects_missing_precursor() {
         let mut s = ok_spec(0, 2, 1.0);
         s.precursor = None;
-        let mut src = ToySource(vec![s]);
+        let mut src = ToySource(vec![s], None);
         let err = assert_source_invariants(&mut src).unwrap_err();
         assert!(matches!(err, ConformanceError::MissingPrecursor { .. }));
     }
@@ -401,7 +456,7 @@ mod tests {
     fn detects_rt_regression_within_same_stream() {
         let s0 = ok_spec(0, 1, 5.0);
         let s1 = ok_spec(1, 1, 2.0);
-        let mut src = ToySource(vec![s0, s1]);
+        let mut src = ToySource(vec![s0, s1], None);
         let err = assert_source_invariants(&mut src).unwrap_err();
         assert!(matches!(
             err,
@@ -413,7 +468,7 @@ mod tests {
     fn detects_mobility_length_mismatch() {
         let mut s = ok_spec(0, 1, 1.0);
         s.inv_mobility_per_peak = Some(vec![0.5]);
-        let mut src = ToySource(vec![s]);
+        let mut src = ToySource(vec![s], None);
         let err = assert_source_invariants(&mut src).unwrap_err();
         assert!(matches!(
             err,

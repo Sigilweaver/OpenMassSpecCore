@@ -1,9 +1,10 @@
-//! Shared enums and types used across the open mass-spec parsers.
+//! Shared enums used across the open mass-spec parsers.
 //!
-//! These mirror the enums historically defined in `opentfraw::types` (which is
-//! where the vocabulary first lived) but are intentionally **vendor neutral**:
-//! anything Thermo-specific (e.g. firmware byte codes, scan-filter symbols)
-//! stays in the vendor crate.
+//! The enums are **vendor neutral**: anything vendor-specific (e.g. firmware
+//! byte codes, scan-filter symbols) stays in the vendor crate.
+//!
+//! Every enum is `#[non_exhaustive]`, so new variants can be added in a minor
+//! release. Code outside this crate that matches on one needs a wildcard arm.
 
 /// Detector / mass analyzer family.
 ///
@@ -11,6 +12,7 @@
 /// available across vendors); other vendors map their detector class onto the
 /// closest equivalent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum Analyzer {
     /// Ion trap.
     ITMS,
@@ -28,34 +30,51 @@ pub enum Analyzer {
 
 /// Scan polarity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum Polarity {
+    /// Negative ion mode.
     Negative,
+    /// Positive ion mode.
     Positive,
 }
 
 /// Whether a spectrum holds centroided peak picks or the raw profile signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum ScanMode {
+    /// Centroided peak list.
     Centroid,
+    /// Continuum (profile) signal.
     Profile,
 }
 
 /// MSn order (MS1, MS2, ...).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MsPower {
+    /// MS order not recorded.
     Undefined,
+    /// MS1.
     Ms1,
+    /// MS2.
     Ms2,
+    /// MS3.
     Ms3,
+    /// MS4.
     Ms4,
+    /// MS5.
     Ms5,
+    /// MS6.
     Ms6,
+    /// MS7.
     Ms7,
+    /// MS8.
     Ms8,
 }
 
 /// Activation method used for MSn fragmentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum Activation {
     /// Higher-energy collisional dissociation (Q Exactive style).
     HCD,
@@ -86,13 +105,10 @@ pub enum Activation {
 /// by the mzML writer.
 ///
 /// Selects both the bytes actually written (compressed or not) and the
-/// matching PSI-MS cvParam. `Zlib` is the default for
-/// [`crate::write_mzml`]/[`crate::write_indexed_mzml`], matching
-/// msconvert/OpenMS output; pass `NoCompression` to
-/// [`crate::write_mzml_with_compression`]/
-/// [`crate::write_indexed_mzml_with_compression`] to keep the previous
-/// (pre-1.4) uncompressed byte layout.
+/// matching PSI-MS cvParam. `Zlib` is the default; select another codec with
+/// [`WriteOptions::with_compression`](crate::WriteOptions::with_compression).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Compression {
     /// No compression: `MS:1000576` ("no compression").
     NoCompression,
@@ -106,6 +122,7 @@ pub enum Compression {
 /// Selects the CV term and unit emitted by the mzML writer when a
 /// [`crate::SpectrumRecord::inv_mobility_per_peak`] array is present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum MobilityArrayKind {
     /// Bruker TIMS convention: per-peak 1/K0 in volt-second per square
     /// centimeter. Emitted as MS:1003008 "raw inverse reduced ion mobility
@@ -130,6 +147,75 @@ impl MsPower {
             Self::Ms6 => 6,
             Self::Ms7 => 7,
             Self::Ms8 => 8,
+        }
+    }
+}
+
+impl Polarity {
+    /// Stable lowercase label (`"positive"`, `"negative"`), used as the
+    /// `polarity` value in `openmassspec-arrow` batches.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Positive => "positive",
+            Self::Negative => "negative",
+        }
+    }
+}
+
+impl ScanMode {
+    /// Stable lowercase label (`"centroid"`, `"profile"`), used as the
+    /// `scan_mode` value in `openmassspec-arrow` batches.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Centroid => "centroid",
+            Self::Profile => "profile",
+        }
+    }
+}
+
+impl Analyzer {
+    /// Stable lowercase label (`"itms"`, `"tqms"`, `"sqms"`, `"tof"`,
+    /// `"ftms"`, `"sector"`), used as the `analyzer` value in
+    /// `openmassspec-arrow` batches.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ITMS => "itms",
+            Self::TQMS => "tqms",
+            Self::SQMS => "sqms",
+            Self::TOFMS => "tof",
+            Self::FTMS => "ftms",
+            Self::Sector => "sector",
+        }
+    }
+}
+
+impl Activation {
+    /// Stable lowercase label (`"hcd"`, `"cid"`, `"ethcd"`, ...), used as the
+    /// `precursor_activation` value in `openmassspec-arrow` batches.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CID => "cid",
+            Self::HCD => "hcd",
+            Self::ETD => "etd",
+            Self::ECD => "ecd",
+            Self::UVPD => "uvpd",
+            Self::PQD => "pqd",
+            Self::PD => "pd",
+            Self::SID => "sid",
+            Self::EThcD => "ethcd",
+            Self::IRMPD => "irmpd",
+            Self::MPID => "mpid",
+        }
+    }
+}
+
+impl MobilityArrayKind {
+    /// Stable label (`"inverse_reduced_k0"`, `"drift_time_ms"`), used as the
+    /// `mobility_array_kind` value in `openmassspec-arrow` batches.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InverseReducedVsPerCm2 => "inverse_reduced_k0",
+            Self::DriftTimeMilliseconds => "drift_time_ms",
         }
     }
 }

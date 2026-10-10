@@ -9,177 +9,126 @@
 //! PSI-MS mzML XSD by the `validate-mzml` CI job.
 
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 
 use openmassspec_core::{
-    write_indexed_mzml, write_mzml, Activation, Analyzer, ChromatogramRecord, CvTerm,
-    MobilityArrayKind, MsPower, Polarity, PrecursorInfo, RunMetadata, ScanMode, SpectrumRecord,
-    SpectrumSource,
+    write_indexed_mzml, write_mzml, Activation, Analyzer, ChromatogramIter, ChromatogramRecord,
+    CvTerm, MobilityArrayKind, MsPower, Polarity, PrecursorInfo, RunMetadata, ScanMode,
+    SpectrumIter, SpectrumRecord, SpectrumSource,
 };
 
 struct SampleSource {
     meta: RunMetadata,
     spectra: Vec<SpectrumRecord>,
     chroms: Vec<ChromatogramRecord>,
-    cursor: usize,
 }
 
 impl SampleSource {
     fn new() -> Self {
-        let meta = RunMetadata {
+        let meta = RunMetadata::new(
             // Digit-leading on purpose: `<run id>` is an `xs:ID`, so this
             // checks the writer turns it into a valid NCName.
-            source_file_name: "20260601_sample.raw".into(),
-            source_file_format: CvTerm::new("MS:1000563", "Thermo RAW format"),
-            native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
-            instrument: CvTerm::new("MS:1001911", "Q Exactive"),
-            instrument_serial_number: Some("SN-EXAMPLE-001".into()),
-            software_name: "openmassspec-core-sample".into(),
-            software_version: env!("CARGO_PKG_VERSION").into(),
-            // Exercises the second `<software>` entry / `<softwareList
-            // count="2">` path so it is schema-checked without a vendor
-            // file.
-            acquisition_software_name: Some("Xcalibur".into()),
-            acquisition_software_version: Some("4.4.16.14".into()),
-            // Exercises the `startTimeStamp` attribute path so it is
-            // schema-checked without a vendor file.
-            start_timestamp: Some("2026-06-01T14:30:00Z".into()),
-            mobility_array_kind: Some(MobilityArrayKind::InverseReducedVsPerCm2),
-            // Exercises the per-spectrum `instrumentConfigurationRef` path:
-            // the FTMS (Orbitrap) spectra below get one instrumentConfiguration
-            // and the TOFMS one gets another, so it is schema-checked without
-            // a vendor file.
-            analyzers: vec![Analyzer::FTMS, Analyzer::TOFMS],
-            extra: std::collections::BTreeMap::from([(
-                "openmassspec.sample_source".into(),
-                "synthetic".into(),
-            )]),
-        };
-        let ms1 = SpectrumRecord {
-            index: 0,
-            scan_number: 1,
-            native_id: "controllerType=0 controllerNumber=1 scan=1".into(),
-            ms_level: MsPower::Ms1.ms_level(),
-            polarity: Some(Polarity::Positive),
-            scan_mode: Some(ScanMode::Centroid),
-            analyzer: Some(Analyzer::FTMS),
-            acquisition_event_id: Some(1),
-            filter: Some("FTMS + p ESI Full ms".into()),
-            retention_time_sec: 0.123 * 60.0,
-            total_ion_current: None,
-            base_peak_mz: None,
-            base_peak_intensity: None,
-            low_mz: None,
-            high_mz: None,
-            ion_injection_time_ms: Some(20.0),
-            inv_mobility: None,
-            faims_cv: None,
-            precursor: None,
-            mz: vec![100.0, 200.0, 300.0],
-            intensity: vec![1.0, 5.0, 2.0],
-            inv_mobility_per_peak: None,
-            extra: std::collections::BTreeMap::from([(
-                "openmassspec.sample_label".into(),
-                "survey".into(),
-            )]),
-        };
-        let ms2 = SpectrumRecord {
-            index: 1,
-            scan_number: 2,
-            native_id: "controllerType=0 controllerNumber=1 scan=2".into(),
-            ms_level: MsPower::Ms2.ms_level(),
-            polarity: Some(Polarity::Positive),
-            scan_mode: Some(ScanMode::Centroid),
-            analyzer: Some(Analyzer::FTMS),
-            acquisition_event_id: None,
-            filter: Some("FTMS + p ESI d Full ms2 200.00@hcd28.00".into()),
-            retention_time_sec: 0.5 * 60.0,
-            total_ion_current: Some(123.45),
-            base_peak_mz: Some(150.5),
-            base_peak_intensity: Some(99.0),
-            low_mz: Some(100.0),
-            high_mz: Some(180.0),
-            ion_injection_time_ms: Some(50.0),
-            inv_mobility: None,
-            faims_cv: Some(-45.0),
-            precursor: Some(PrecursorInfo {
-                target_mz: Some(200.0),
-                selected_mz: Some(200.001),
-                isolation_width: Some(2.0),
-                charge: Some(2),
-                intensity: None,
-                collision_energy: Some(28.0),
-                ce_is_nce: true,
-                precursor_native_id: Some("controllerType=0 controllerNumber=1 scan=1".into()),
-                activation: Some(Activation::CID),
-                analyzer: Some(Analyzer::FTMS),
-                // Exercises the `collisional cross sectional area` selectedIon
-                // cvParam path so it is schema-checked without a vendor file.
-                ccs: Some(153.4),
-            }),
-            mz: vec![150.5, 160.0],
-            intensity: vec![99.0, 50.0],
-            inv_mobility_per_peak: None,
-            extra: Default::default(),
-        };
+            "20260601_sample.raw",
+            CvTerm::new("MS:1000563", "Thermo RAW format"),
+            CvTerm::new("MS:1000768", "Thermo nativeID format"),
+            CvTerm::new("MS:1001911", "Q Exactive"),
+            // Not an NCName on purpose: `<software id>` is an `xs:ID` too.
+            "openmassspec-core sample",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .with_instrument_serial_number("SN-EXAMPLE-001".to_string())
+        // Exercises the second `<software>` entry / `<softwareList
+        // count="2">` path so it is schema-checked without a vendor file.
+        .with_acquisition_software_name("Xcalibur".to_string())
+        .with_acquisition_software_version("4.4.16.14".to_string())
+        // Exercises the `startTimeStamp` attribute path.
+        .with_start_timestamp("2026-06-01T14:30:00Z".to_string())
+        .with_mobility_array_kind(MobilityArrayKind::InverseReducedVsPerCm2)
+        // Exercises the per-spectrum `instrumentConfigurationRef` path:
+        // the FTMS (Orbitrap) spectra below get one instrumentConfiguration
+        // and the TOFMS one gets another.
+        .with_analyzers(vec![Analyzer::FTMS, Analyzer::TOFMS])
+        .with_extra("openmassspec.sample_source", "synthetic");
+
+        let ms1 = SpectrumRecord::new(0, 1, "controllerType=0 controllerNumber=1 scan=1")
+            .with_ms_level(MsPower::Ms1.ms_level())
+            .with_polarity(Polarity::Positive)
+            .with_scan_mode(ScanMode::Centroid)
+            .with_analyzer(Analyzer::FTMS)
+            .with_acquisition_event_id(1)
+            .with_filter("FTMS + p ESI Full ms".to_string())
+            .with_retention_time_sec(0.123 * 60.0)
+            .with_ion_injection_time_ms(20.0)
+            .with_peaks(vec![100.0, 200.0, 300.0], vec![1.0, 5.0, 2.0])
+            .with_extra("openmassspec.sample_label", "survey");
+        let ms2 = SpectrumRecord::new(1, 2, "controllerType=0 controllerNumber=1 scan=2")
+            .with_ms_level(MsPower::Ms2.ms_level())
+            .with_polarity(Polarity::Positive)
+            .with_scan_mode(ScanMode::Centroid)
+            .with_analyzer(Analyzer::FTMS)
+            .with_filter("FTMS + p ESI d Full ms2 200.00@hcd28.00".to_string())
+            .with_retention_time_sec(0.5 * 60.0)
+            .with_total_ion_current(123.45)
+            .with_base_peak_mz(150.5)
+            .with_base_peak_intensity(99.0)
+            .with_low_mz(100.0)
+            .with_high_mz(180.0)
+            .with_ion_injection_time_ms(50.0)
+            .with_faims_cv(-45.0)
+            .with_precursor(
+                PrecursorInfo::default()
+                    .with_target_mz(200.0)
+                    .with_selected_mz(200.001)
+                    .with_isolation_width(2.0)
+                    .with_charge(2)
+                    .with_collision_energy(28.0)
+                    .with_ce_is_nce(true)
+                    .with_precursor_native_id(
+                        "controllerType=0 controllerNumber=1 scan=1".to_string(),
+                    )
+                    .with_activation(Activation::CID)
+                    .with_analyzer(Analyzer::FTMS)
+                    // Exercises the `collisional cross sectional area`
+                    // selectedIon cvParam path.
+                    .with_ccs(153.4),
+            )
+            .with_peaks(vec![150.5, 160.0], vec![99.0, 50.0]);
         // A frame-collapsed ion-mobility MS1 (the Bruker timsTOF shape):
         // scalar 1/K0 plus a per-peak inverse-reduced-mobility array, which
-        // the writer emits as a third binary data array. Exercises the
-        // ion-mobility CV path so it is schema-checked without a vendor file.
-        let ms1_mobility = SpectrumRecord {
-            index: 2,
-            scan_number: 3,
-            native_id: "frame=1 scan=0".into(),
-            ms_level: MsPower::Ms1.ms_level(),
-            polarity: Some(Polarity::Positive),
-            scan_mode: Some(ScanMode::Centroid),
-            analyzer: Some(Analyzer::TOFMS),
-            acquisition_event_id: None,
-            filter: None,
-            retention_time_sec: 0.75 * 60.0,
-            total_ion_current: None,
-            base_peak_mz: None,
-            base_peak_intensity: None,
-            low_mz: None,
-            high_mz: None,
-            ion_injection_time_ms: None,
-            inv_mobility: Some(0.95),
-            faims_cv: None,
-            precursor: None,
-            mz: vec![120.0, 240.0, 360.0],
-            intensity: vec![3.0, 7.0, 4.0],
-            inv_mobility_per_peak: Some(vec![0.92, 0.95, 0.98]),
-            extra: Default::default(),
-        };
+        // the writer emits as a third binary data array.
+        let ms1_mobility = SpectrumRecord::new(2, 3, "frame=1 scan=0")
+            .with_ms_level(MsPower::Ms1.ms_level())
+            .with_polarity(Polarity::Positive)
+            .with_scan_mode(ScanMode::Centroid)
+            .with_analyzer(Analyzer::TOFMS)
+            .with_retention_time_sec(0.75 * 60.0)
+            .with_inv_mobility(0.95)
+            .with_peaks(vec![120.0, 240.0, 360.0], vec![3.0, 7.0, 4.0])
+            .with_inv_mobility_per_peak(vec![0.92, 0.95, 0.98]);
         // A TIC and a SRM/MRM transition chromatogram. Exercises the
-        // `chromatogramList` path (plain + indexed) so it is schema-checked
-        // without a vendor file.
-        let tic = ChromatogramRecord {
-            index: 0,
-            id: "TIC".into(),
-            chromatogram_type: Some(CvTerm::new("MS:1000235", "total ion current chromatogram")),
-            precursor_mz: None,
-            product_mz: None,
-            time_sec: vec![0.0, 30.0, 45.0],
-            intensity: vec![120.0, 340.0, 210.0],
-        };
-        let srm = ChromatogramRecord {
-            index: 1,
-            id: "SRM SIC Q1=524.3 Q3=136.1".into(),
-            chromatogram_type: Some(CvTerm::new(
-                "MS:1001473",
-                "selected reaction monitoring chromatogram",
-            )),
-            precursor_mz: Some(524.3),
-            product_mz: Some(136.1),
-            time_sec: vec![0.0, 30.0],
-            intensity: vec![50.0, 80.0],
-        };
+        // `chromatogramList` path (plain + indexed).
+        let tic =
+            ChromatogramRecord::new(0, "TIC", vec![0.0, 30.0, 45.0], vec![120.0, 340.0, 210.0])
+                .with_chromatogram_type(CvTerm::new(
+                    "MS:1000235",
+                    "total ion current chromatogram",
+                ));
+        let srm = ChromatogramRecord::new(
+            1,
+            "SRM SIC Q1=524.3 Q3=136.1",
+            vec![0.0, 30.0],
+            vec![50.0, 80.0],
+        )
+        .with_chromatogram_type(CvTerm::new(
+            "MS:1001473",
+            "selected reaction monitoring chromatogram",
+        ))
+        .with_precursor_mz(524.3)
+        .with_product_mz(136.1);
         Self {
             meta,
             spectra: vec![ms1, ms2, ms1_mobility],
             chroms: vec![tic, srm],
-            cursor: 0,
         }
     }
 }
@@ -189,19 +138,12 @@ impl SpectrumSource for SampleSource {
         self.meta.clone()
     }
 
-    fn iter_spectra<'a>(&'a mut self) -> Box<dyn Iterator<Item = SpectrumRecord> + 'a> {
-        self.cursor = 0;
-        Box::new(std::iter::from_fn(move || {
-            let rec = self.spectra.get(self.cursor).cloned();
-            if rec.is_some() {
-                self.cursor += 1;
-            }
-            rec
-        }))
+    fn iter_spectra<'a>(&'a mut self) -> SpectrumIter<'a> {
+        Box::new(self.spectra.iter().cloned().map(Ok))
     }
 
-    fn iter_chromatograms<'a>(&'a mut self) -> Box<dyn Iterator<Item = ChromatogramRecord> + 'a> {
-        Box::new(self.chroms.clone().into_iter())
+    fn iter_chromatograms<'a>(&'a mut self) -> ChromatogramIter<'a> {
+        Box::new(self.chroms.iter().cloned().map(Ok))
     }
 
     fn spectrum_count_hint(&self) -> Option<usize> {
@@ -209,19 +151,19 @@ impl SpectrumSource for SampleSource {
     }
 }
 
-fn main() -> std::io::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let plain_path = args.next().unwrap_or_else(|| "sample_plain.mzML".into());
     let indexed_path = args.next().unwrap_or_else(|| "sample_indexed.mzML".into());
 
     let mut src = SampleSource::new();
     let mut plain = BufWriter::new(File::create(&plain_path)?);
-    write_mzml(&mut src, &mut plain)
-        .map_err(|e| std::io::Error::other(format!("write_mzml: {e}")))?;
+    write_mzml(&mut src, &mut plain)?;
+    plain.flush()?;
 
     let mut indexed = BufWriter::new(File::create(&indexed_path)?);
-    write_indexed_mzml(&mut src, &mut indexed)
-        .map_err(|e| std::io::Error::other(format!("write_indexed_mzml: {e}")))?;
+    write_indexed_mzml(&mut src, &mut indexed)?;
+    indexed.flush()?;
 
     eprintln!("wrote {plain_path} and {indexed_path}");
     Ok(())

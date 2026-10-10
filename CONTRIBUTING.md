@@ -4,7 +4,7 @@ Thanks for your interest in OpenMassSpecCore. This is a small, single-maintainer
 project that ships [Apache-2.0](LICENSE) Rust (and Python where
 applicable) tooling for the open mass-spec stack.
 
-Crates / packages in this repo: openmassspec-core.
+Crates / packages in this repo: openmassspec-core, openmassspec-arrow (crates/openmassspec-arrow).
 
 ## Before you open a PR
 
@@ -12,9 +12,9 @@ Crates / packages in this repo: openmassspec-core.
   format change, vendor coverage, dependency bump beyond a patch). For
   small fixes - typos, docs, minor bug fixes, additional tests -
   go straight to a PR.
-- Run `cargo fmt --all` and `cargo clippy --all-targets -- -D warnings` locally.
+- Run `cargo fmt --all` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` locally.
   CI will run them too.
-- Run `cargo test --all` (and `pytest` if the change touches Python).
+- Run `cargo test --workspace --all-features` (and `pytest` if the change touches Python).
 - Update [CHANGELOG.md](CHANGELOG.md) under `## [Unreleased]` with a
   short bullet describing the user-visible change.
 - Keep commits small and prefer [Conventional Commits](https://www.conventionalcommits.org/)

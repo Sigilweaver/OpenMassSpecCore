@@ -1,24 +1,33 @@
 //! `openmassspec-core` is the shared foundation for the open Rust mass-spec
-//! parsers (`opentfraw`, `opentimstdf`, `openwraw`).
+//! parsers (`opentfraw`, `opentimstdf`, `openwraw`, `openaraw`, `opensxraw`,
+//! `openszraw`).
 //!
 //! It exposes:
 //!
 //! * Vendor-neutral spectrum / chromatogram / run records:
 //!   [`SpectrumRecord`], [`PrecursorInfo`], [`ChromatogramRecord`],
-//!   [`RunMetadata`], [`CvTerm`].
+//!   [`RunMetadata`], [`CvTerm`]. All are `#[non_exhaustive]` and built with
+//!   constructors plus `with_*` setters.
 //! * Shared enums: [`Polarity`], [`ScanMode`], [`Analyzer`], [`MsPower`],
-//!   [`Activation`], [`Compression`].
-//! * A trait every vendor parser implements: [`SpectrumSource`].
+//!   [`Activation`], [`Compression`], [`MobilityArrayKind`].
+//! * A trait every vendor parser implements: [`SpectrumSource`]. Its
+//!   iterators yield `Result` items, so decode errors reach the consumer.
 //! * One canonical mzML 1.1.0 writer: [`write_mzml`] and
-//!   [`write_indexed_mzml`] (zlib-compressed binary data arrays by default;
-//!   [`write_mzml_with_compression`]/[`write_indexed_mzml_with_compression`]
-//!   for explicit codec control).
+//!   [`write_indexed_mzml`] (zlib-compressed binary data arrays, stop at the
+//!   first record error), with [`WriteOptions`] for codec and
+//!   [`RecordErrorPolicy`] control. Each call returns a [`WriteSummary`].
+//! * Typed PSI-MS / UO terms generated from `psi-ms.obo`: [`cv`].
 //! * A streaming profile-to-centroid transform, [`Centroided`], that wraps
 //!   any `SpectrumSource`.
+//! * A conformance harness for parser test suites: [`conformance`].
+//!
+//! The Apache Arrow bridge lives in the separate `openmassspec-arrow` crate.
 //!
 //! Each vendor crate is a standalone tool (a user can pull in `opentfraw`
 //! alone and get parsing **and** mzML export); `openmassspec-core` is the
-//! shared vocabulary that keeps the three parsers in lock-step.
+//! shared vocabulary that keeps the parsers in lock-step.
+
+#![warn(missing_docs)]
 
 mod centroid;
 mod enums;
@@ -27,9 +36,8 @@ mod mzml;
 mod source;
 mod types;
 
-#[cfg(feature = "arrow")]
-pub mod arrow;
 pub mod conformance;
+pub mod cv;
 
 pub use centroid::Centroided;
 pub use enums::{
@@ -37,10 +45,10 @@ pub use enums::{
 };
 pub use error::{Error, Result};
 pub use mzml::{
-    write_indexed_mzml, write_indexed_mzml_with_compression, write_mzml,
-    write_mzml_with_compression,
+    write_indexed_mzml, write_indexed_mzml_with_options, write_mzml, write_mzml_with_options,
+    RecordErrorPolicy, WriteOptions, WriteSummary,
 };
-pub use source::SpectrumSource;
+pub use source::{ChromatogramIter, SpectrumIter, SpectrumSource};
 pub use types::{ChromatogramRecord, CvTerm, PrecursorInfo, RunMetadata, SpectrumRecord};
 
 /// Crate version (set from `Cargo.toml`).

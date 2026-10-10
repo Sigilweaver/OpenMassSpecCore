@@ -8,9 +8,10 @@
 //! the streaming mzML writer and the Arrow bridge without buffering a whole
 //! run in memory.
 
+use crate::cv;
 use crate::enums::ScanMode;
-use crate::source::SpectrumSource;
-use crate::types::{ChromatogramRecord, RunMetadata, SpectrumRecord};
+use crate::source::{ChromatogramIter, SpectrumIter, SpectrumSource};
+use crate::types::{CvTerm, RunMetadata, SpectrumRecord};
 
 /// Wraps a [`SpectrumSource`], centroiding every profile-mode spectrum it
 /// yields. Spectra already tagged [`ScanMode::Centroid`] pass through
@@ -41,16 +42,17 @@ impl<S: SpectrumSource> SpectrumSource for Centroided<S> {
         self.inner.run_metadata()
     }
 
-    fn iter_spectra<'a>(&'a mut self) -> Box<dyn Iterator<Item = SpectrumRecord> + 'a> {
+    /// Errors from the wrapped source pass through unchanged.
+    fn iter_spectra<'a>(&'a mut self) -> SpectrumIter<'a> {
         let min_intensity = self.min_intensity;
         Box::new(
             self.inner
                 .iter_spectra()
-                .map(move |rec| centroid_record(rec, min_intensity)),
+                .map(move |rec| rec.map(|rec| centroid_record(rec, min_intensity))),
         )
     }
 
-    fn iter_chromatograms<'a>(&'a mut self) -> Box<dyn Iterator<Item = ChromatogramRecord> + 'a> {
+    fn iter_chromatograms<'a>(&'a mut self) -> ChromatogramIter<'a> {
         self.inner.iter_chromatograms()
     }
 
@@ -58,9 +60,9 @@ impl<S: SpectrumSource> SpectrumSource for Centroided<S> {
         self.inner.spectrum_count_hint()
     }
 
-    fn additional_processing_steps(&self) -> Vec<(&'static str, &'static str)> {
+    fn additional_processing_steps(&self) -> Vec<CvTerm> {
         let mut steps = self.inner.additional_processing_steps();
-        steps.push(("MS:1000035", "peak picking"));
+        steps.push(cv::PEAK_PICKING.into());
         steps
     }
 }
@@ -163,11 +165,13 @@ fn pick_peaks(
 mod tests {
     use super::*;
     use crate::conformance::assert_source_invariants;
-    use crate::{CvTerm, MsPower, Polarity};
+    use crate::{MsPower, Polarity};
 
     struct OneSpectrumSource {
         meta: RunMetadata,
         rec: Option<SpectrumRecord>,
+        /// Yield an `Err` after the record.
+        then_fail: bool,
     }
 
     impl OneSpectrumSource {
@@ -189,6 +193,7 @@ mod tests {
                     extra: Default::default(),
                 },
                 rec: Some(rec),
+                then_fail: false,
             }
         }
     }
@@ -198,8 +203,13 @@ mod tests {
             self.meta.clone()
         }
 
-        fn iter_spectra<'a>(&'a mut self) -> Box<dyn Iterator<Item = SpectrumRecord> + 'a> {
-            Box::new(self.rec.take().into_iter())
+        fn iter_spectra<'a>(&'a mut self) -> SpectrumIter<'a> {
+            let fail = self.then_fail.then(|| {
+                Err(crate::Error::vendor(std::io::Error::other(
+                    "truncated scan",
+                )))
+            });
+            Box::new(self.rec.take().map(Ok).into_iter().chain(fail))
         }
 
         fn spectrum_count_hint(&self) -> Option<usize> {
@@ -247,7 +257,7 @@ mod tests {
     #[test]
     fn centroids_profile_spectrum_at_known_apexes() {
         let mut src = Centroided::new(OneSpectrumSource::new(profile_spectrum()));
-        let recs: Vec<_> = src.iter_spectra().collect();
+        let recs: Vec<_> = src.iter_spectra().collect::<crate::Result<_>>().unwrap();
         assert_eq!(recs.len(), 1);
         let rec = &recs[0];
 
@@ -277,7 +287,7 @@ mod tests {
         let original_mz = rec.mz.clone();
 
         let mut src = Centroided::new(OneSpectrumSource::new(rec));
-        let recs: Vec<_> = src.iter_spectra().collect();
+        let recs: Vec<_> = src.iter_spectra().collect::<crate::Result<_>>().unwrap();
         assert_eq!(recs[0].mz, original_mz);
     }
 
@@ -286,7 +296,7 @@ mod tests {
         let src = Centroided::new(OneSpectrumSource::new(profile_spectrum()));
         assert_eq!(
             src.additional_processing_steps(),
-            vec![("MS:1000035", "peak picking")]
+            vec![CvTerm::from(cv::PEAK_PICKING)]
         );
     }
 
@@ -300,8 +310,8 @@ mod tests {
         assert_eq!(
             outer.additional_processing_steps(),
             vec![
-                ("MS:1000035", "peak picking"),
-                ("MS:1000035", "peak picking")
+                CvTerm::from(cv::PEAK_PICKING),
+                CvTerm::from(cv::PEAK_PICKING),
             ]
         );
     }
@@ -334,9 +344,24 @@ mod tests {
         );
         // The dataProcessingList must record that peak picking happened,
         // not just the blanket "Conversion to mzML" step every writer run
-        // gets (see issue: centroiding left no provenance trail).
+        // gets.
         assert!(xml.contains(
             r#"<cvParam cvRef="MS" accession="MS:1000035" name="peak picking" value=""/>"#
         ));
+    }
+
+    #[test]
+    fn inner_errors_pass_through() {
+        let mut inner = OneSpectrumSource::new(profile_spectrum());
+        inner.then_fail = true;
+        let mut src = Centroided::new(inner);
+        let results: Vec<_> = src.iter_spectra().collect();
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].as_ref().unwrap().scan_mode,
+            Some(ScanMode::Centroid)
+        );
+        let err = results[1].as_ref().unwrap_err();
+        assert!(err.to_string().contains("truncated scan"), "{err}");
     }
 }

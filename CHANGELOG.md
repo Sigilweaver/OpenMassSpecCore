@@ -4,7 +4,135 @@ All notable changes to `openmassspec-core` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 crate adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [3.0.0] - Unreleased
+
+This release is intended to be the last breaking release of the core API:
+public types are `#[non_exhaustive]`, so later field, variant, and CV-term
+additions are minor releases. Reader authors: see
+[MIGRATING-3.0.md](MIGRATING-3.0.md) for step-by-step instructions.
+
+### Changed
+
+- **Breaking:** `SpectrumSource::iter_spectra` and `iter_chromatograms` now
+  yield `openmassspec_core::Result<SpectrumRecord>` /
+  `Result<ChromatogramRecord>` (aliases `SpectrumIter<'a>` and
+  `ChromatogramIter<'a>`). A record the parser cannot decode is yielded as
+  `Err` (wrap vendor errors with `Error::vendor`) instead of being skipped.
+  The error type is the shared `openmassspec_core::Error`, not an associated
+  type, so `dyn SpectrumSource` and adapters such as `Centroided` work across
+  vendors unchanged.
+- **Breaking:** the mzML writer propagates record errors. `write_mzml` and
+  `write_indexed_mzml` return `openmassspec_core::Result<WriteSummary>`
+  (was `std::io::Result<()>`) and stop at the first `Err` record.
+  `write_mzml_with_compression` / `write_indexed_mzml_with_compression` are
+  replaced by `write_mzml_with_options` / `write_indexed_mzml_with_options`
+  taking `WriteOptions` (compression and `RecordErrorPolicy`).
+- **Breaking:** `SpectrumRecord`, `PrecursorInfo`, `ChromatogramRecord`,
+  `RunMetadata`, `CvTerm`, `Polarity`, `ScanMode`, `Analyzer`, `MsPower`,
+  `Activation`, `Compression`, `MobilityArrayKind`, `Error`, and
+  `conformance::ConformanceError` (and its variants) are `#[non_exhaustive]`.
+  Build records with the new constructors and `with_*` setters; match enums
+  with a wildcard arm.
+- **Breaking:** `CvTerm::accession` and `CvTerm::name` are
+  `Cow<'static, str>`. `CvTerm::new` accepts `&'static str` or `String`.
+- **Breaking:** `SpectrumSource::additional_processing_steps` returns
+  `Vec<CvTerm>` (was `Vec<(&'static str, &'static str)>`).
+- **Breaking:** `conformance::assert_source_invariants` reports an `Err`
+  item as `ConformanceError::Source { position, error }` and accepts
+  `?Sized` sources.
+- The repository is a Cargo workspace. All crates share version 3.0.0.
+- The emitted `<cv id="MS">` entry names the `psi-ms.obo` release the
+  writer's terms are generated from (4.2.4, with its tagged source URL).
+- MSRV stays at 1.88.
+
+### Added
+
+- `openmassspec_core::cv`: typed `cv::Term` constants for every PSI-MS / UO
+  term the writer emits, generated from HUPO-PSI `psi-ms.obo` 4.2.4 by
+  `scripts/gen-cv.py` (term list in `scripts/cv-terms.txt`), plus
+  `cv::lookup`, `cv::ALL`, `cv::PSI_MS_VERSION`, and
+  `cv::PSI_MS_SOURCE_URL`. `CvTerm` implements `From<cv::Term>`.
+- Constructors and builder setters: `SpectrumRecord::new`,
+  `ChromatogramRecord::new`, `RunMetadata::new`, `PrecursorInfo::default`,
+  and a `with_<field>` setter for every field (setters for `Option` fields
+  accept `T` or `Option<T>`), plus `SpectrumRecord::with_peaks` and
+  `with_extra` on `SpectrumRecord` and `RunMetadata`.
+- `WriteOptions`, `RecordErrorPolicy` (`Fail` by default, opt-in `Skip`),
+  and `WriteSummary` (spectra and chromatograms written and skipped).
+- `as_str` on `Polarity`, `ScanMode`, `Analyzer`, `Activation`, and
+  `MobilityArrayKind`: the stable labels used in Arrow batches.
+- `PartialEq` on `SpectrumRecord`, `PrecursorInfo`, `ChromatogramRecord`,
+  `RunMetadata`; `Hash` on `CvTerm`.
+- `MIGRATING-3.0.md` for reader authors.
+
+### Removed
+
+- **Breaking:** the `arrow` feature of `openmassspec-core`. The Arrow bridge
+  is the new `openmassspec-arrow` crate in this repository, with the same
+  `spectrum_record_schema` and `SpectrumBatchBuilder` API and Arrow schema.
+  `openmassspec-core` has no Arrow dependency.
+- `write_mzml_with_compression` and `write_indexed_mzml_with_compression`
+  (use the `*_with_options` functions).
+
+### Fixed
+
+- mzML writer: `<software id>` (and every `processingMethod softwareRef`)
+  is a valid `xs:ID`. It was the raw `RunMetadata::software_name`, so a name
+  with spaces or a leading digit failed XSD validation. It is sanitized like
+  `<run id>` (prefix `software_`), and `<run id>` never collides with it.
+  The `MS:1000799` cvParam keeps the original name as its value.
+- `CvTerm` deserialization no longer leaks or interns strings; deserialized
+  terms own their strings.
+- Readers can no longer drop decode errors through `SpectrumSource`, and the
+  writer no longer accepts a stream with silently missing records.
+
+### Migration
+
+Before (2.x reader):
+
+```rust
+impl SpectrumSource for Reader {
+    fn iter_spectra<'a>(&'a mut self) -> Box<dyn Iterator<Item = SpectrumRecord> + 'a> {
+        Box::new((0..self.n).filter_map(move |i| self.decode(i).ok()))
+    }
+}
+
+SpectrumRecord { index: i, scan_number: i as u32 + 1, native_id, ms_level: 2,
+                 polarity: Some(Polarity::Positive), mz, intensity, /* all fields */ }
+```
+
+After (3.0 reader):
+
+```rust
+impl SpectrumSource for Reader {
+    fn iter_spectra<'a>(&'a mut self) -> SpectrumIter<'a> {
+        Box::new((0..self.n).map(move |i| self.decode(i).map_err(Error::vendor)))
+    }
+}
+
+SpectrumRecord::new(i, i as u32 + 1, native_id)
+    .with_ms_level(2)
+    .with_polarity(Polarity::Positive)
+    .with_peaks(mz, intensity)
+```
+
+Writer callers:
+
+```rust
+// 2.x
+write_mzml_with_compression(&mut src, &mut out, Compression::NoCompression)?; // io::Result<()>
+// 3.0
+let summary = write_mzml_with_options(
+    &mut src,
+    &mut out,
+    &WriteOptions::new().with_compression(Compression::NoCompression),
+)?; // openmassspec_core::Result<WriteSummary>
+```
+
+Arrow users replace the `arrow` feature with the `openmassspec-arrow` crate
+and `openmassspec_core::arrow::` with `openmassspec_arrow::`.
+
+## [2.0.1] - Unreleased
 
 ### Fixed
 

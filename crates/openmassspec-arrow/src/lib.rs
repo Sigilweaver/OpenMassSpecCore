@@ -1,11 +1,26 @@
-//! Apache Arrow bridge for [`crate::SpectrumRecord`].
+//! Apache Arrow bridge for [`openmassspec_core::SpectrumRecord`].
 //!
-//! This module is gated behind the `arrow` Cargo feature. It exposes:
+//! It exposes:
 //!
 //! * [`spectrum_record_schema`]: the canonical Arrow [`Schema`] for a
 //!   stream of `SpectrumRecord`s.
 //! * [`SpectrumBatchBuilder`]: a streaming builder that accumulates rows
 //!   and produces a [`RecordBatch`] when finalized.
+//!
+//! ```
+//! use openmassspec_arrow::SpectrumBatchBuilder;
+//! use openmassspec_core::SpectrumRecord;
+//!
+//! let mut builder = SpectrumBatchBuilder::new(None);
+//! builder.push(
+//!     &SpectrumRecord::new(0, 1, "scan=1").with_peaks(vec![100.0], vec![5.0]),
+//! );
+//! let batch = builder.finish().unwrap();
+//! assert_eq!(batch.num_rows(), 1);
+//! ```
+//!
+//! Enum columns hold the stable labels from each enum's `as_str` method
+//! (e.g. [`Analyzer::as_str`]).
 //!
 //! The schema is intentionally flat (one row per spectrum). Peak arrays
 //! are stored as `LargeList<Float64>` / `LargeList<Float32>` so that
@@ -14,8 +29,7 @@
 //! spectrum has all precursor columns null. This shape is friendly to
 //! Polars / DataFusion / DuckDB consumers.
 //!
-//! The Arrow schema is part of this crate's stable surface for the
-//! purposes of consumers that pin `openmassspec-core` directly; any column
+//! The Arrow schema is part of this crate's stable surface: any column
 //! addition is a minor-version bump, any removal or rename is breaking.
 
 use std::sync::Arc;
@@ -27,7 +41,9 @@ use arrow_array::builder::{
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 
-use crate::{Activation, Analyzer, MobilityArrayKind, Polarity, ScanMode, SpectrumRecord};
+use openmassspec_core::{
+    Activation, Analyzer, MobilityArrayKind, Polarity, ScanMode, SpectrumRecord,
+};
 
 // Arrow-spec map field names for the `extra` column.
 const EXTRA_ENTRIES_FIELD: &str = "entries";
@@ -84,54 +100,6 @@ pub fn spectrum_record_schema() -> SchemaRef {
     ]))
 }
 
-fn polarity_str(p: Polarity) -> &'static str {
-    match p {
-        Polarity::Positive => "positive",
-        Polarity::Negative => "negative",
-    }
-}
-
-fn scan_mode_str(m: ScanMode) -> &'static str {
-    match m {
-        ScanMode::Profile => "profile",
-        ScanMode::Centroid => "centroid",
-    }
-}
-
-fn analyzer_str(a: Analyzer) -> &'static str {
-    match a {
-        Analyzer::ITMS => "itms",
-        Analyzer::TQMS => "tqms",
-        Analyzer::SQMS => "sqms",
-        Analyzer::TOFMS => "tof",
-        Analyzer::FTMS => "ftms",
-        Analyzer::Sector => "sector",
-    }
-}
-
-fn activation_str(a: Activation) -> &'static str {
-    match a {
-        Activation::CID => "cid",
-        Activation::HCD => "hcd",
-        Activation::ETD => "etd",
-        Activation::ECD => "ecd",
-        Activation::UVPD => "uvpd",
-        Activation::PQD => "pqd",
-        Activation::PD => "pd",
-        Activation::SID => "sid",
-        Activation::EThcD => "ethcd",
-        Activation::IRMPD => "irmpd",
-        Activation::MPID => "mpid",
-    }
-}
-
-fn mobility_kind_str(k: MobilityArrayKind) -> &'static str {
-    match k {
-        MobilityArrayKind::InverseReducedVsPerCm2 => "inverse_reduced_k0",
-        MobilityArrayKind::DriftTimeMilliseconds => "drift_time_ms",
-    }
-}
-
 /// Streaming builder that accumulates `SpectrumRecord`s and produces a
 /// single Arrow [`RecordBatch`] when finalized.
 ///
@@ -179,7 +147,7 @@ pub struct SpectrumBatchBuilder {
 
 impl SpectrumBatchBuilder {
     /// Create a new builder. Pass the `mobility_array_kind` from the
-    /// source's [`crate::RunMetadata`] so the resulting Arrow batch
+    /// source's [`RunMetadata`](openmassspec_core::RunMetadata) so the resulting Arrow batch
     /// carries the unit/CV interpretation alongside the data.
     pub fn new(mobility_kind: Option<MobilityArrayKind>) -> Self {
         Self {
@@ -249,10 +217,12 @@ impl SpectrumBatchBuilder {
         self.scan_number.append_value(rec.scan_number);
         self.native_id.append_value(&rec.native_id);
         self.ms_level.append_value(rec.ms_level as u8);
-        self.polarity.append_option(rec.polarity.map(polarity_str));
+        self.polarity
+            .append_option(rec.polarity.map(Polarity::as_str));
         self.scan_mode
-            .append_option(rec.scan_mode.map(scan_mode_str));
-        self.analyzer.append_option(rec.analyzer.map(analyzer_str));
+            .append_option(rec.scan_mode.map(ScanMode::as_str));
+        self.analyzer
+            .append_option(rec.analyzer.map(Analyzer::as_str));
         self.filter.append_option(rec.filter.as_deref());
         self.retention_time_sec.append_value(rec.retention_time_sec);
         self.total_ion_current.append_option(rec.total_ion_current);
@@ -280,9 +250,9 @@ impl SpectrumBatchBuilder {
                 self.precursor_native_id
                     .append_option(p.precursor_native_id.as_deref());
                 self.precursor_activation
-                    .append_option(p.activation.map(activation_str));
+                    .append_option(p.activation.map(Activation::as_str));
                 self.precursor_analyzer
-                    .append_option(p.analyzer.map(analyzer_str));
+                    .append_option(p.analyzer.map(Analyzer::as_str));
                 self.precursor_ccs.append_option(p.ccs);
             }
             None => {
@@ -318,7 +288,7 @@ impl SpectrumBatchBuilder {
             None => self.inv_mobility_per_peak.append(false),
         }
         self.mobility_array_kind_col
-            .append_option(self.mobility_kind.map(mobility_kind_str));
+            .append_option(self.mobility_kind.map(MobilityArrayKind::as_str));
         self.acquisition_event_id
             .append_option(rec.acquisition_event_id);
         for (key, value) in &rec.extra {
@@ -385,8 +355,8 @@ impl SpectrumBatchBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PrecursorInfo, SpectrumRecord};
     use arrow_array::Array;
+    use openmassspec_core::PrecursorInfo;
 
     fn rec(index: usize, ms_level: u32, n_peaks: usize, with_mob: bool) -> SpectrumRecord {
         let mz: Vec<f64> = (0..n_peaks).map(|i| 100.0 + i as f64).collect();
@@ -396,47 +366,34 @@ mod tests {
         } else {
             None
         };
-        SpectrumRecord {
-            index,
-            scan_number: (index + 1) as u32,
-            native_id: format!("scan={}", index + 1),
-            ms_level,
-            polarity: Some(Polarity::Positive),
-            scan_mode: Some(ScanMode::Centroid),
-            analyzer: Some(Analyzer::TOFMS),
-            acquisition_event_id: (index == 0).then_some(7),
-            filter: None,
-            retention_time_sec: index as f64,
-            total_ion_current: Some(intensity.iter().map(|&v| v as f64).sum()),
-            base_peak_mz: mz.last().copied(),
-            base_peak_intensity: intensity.last().map(|&v| v as f64),
-            low_mz: mz.first().copied(),
-            high_mz: mz.last().copied(),
-            ion_injection_time_ms: None,
-            inv_mobility: None,
-            faims_cv: if index == 0 { Some(-40.0) } else { None },
-            precursor: if ms_level >= 2 {
-                Some(PrecursorInfo {
-                    target_mz: Some(500.0),
-                    selected_mz: Some(500.5),
-                    isolation_width: Some(2.0),
-                    charge: Some(2),
-                    ..Default::default()
-                })
-            } else {
-                None
-            },
-            mz,
-            intensity,
-            extra: if index == 0 {
-                [("opentfraw.resolution".to_string(), "120000".to_string())]
-                    .into_iter()
-                    .collect()
-            } else {
-                Default::default()
-            },
-            inv_mobility_per_peak: mobility,
+        let mut rec = SpectrumRecord::new(index, (index + 1) as u32, format!("scan={}", index + 1))
+            .with_ms_level(ms_level)
+            .with_polarity(Polarity::Positive)
+            .with_scan_mode(ScanMode::Centroid)
+            .with_analyzer(Analyzer::TOFMS)
+            .with_acquisition_event_id((index == 0).then_some(7))
+            .with_retention_time_sec(index as f64)
+            .with_total_ion_current(intensity.iter().map(|&v| v as f64).sum::<f64>())
+            .with_base_peak_mz(mz.last().copied())
+            .with_base_peak_intensity(intensity.last().map(|&v| v as f64))
+            .with_low_mz(mz.first().copied())
+            .with_high_mz(mz.last().copied())
+            .with_faims_cv(if index == 0 { Some(-40.0) } else { None })
+            .with_inv_mobility_per_peak(mobility)
+            .with_peaks(mz, intensity);
+        if ms_level >= 2 {
+            rec.precursor = Some(
+                PrecursorInfo::default()
+                    .with_target_mz(500.0)
+                    .with_selected_mz(500.5)
+                    .with_isolation_width(2.0)
+                    .with_charge(2),
+            );
         }
+        if index == 0 {
+            rec = rec.with_extra("opentfraw.resolution", "120000");
+        }
+        rec
     }
 
     #[test]
