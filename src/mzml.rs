@@ -1037,20 +1037,18 @@ fn write_spectrum<W: Write>(
         writeln!(out, r#"          </binaryDataArray>"#)?;
 
         if let Some(mobility_b64) = mobility_b64_opt {
-            let (cv_acc, cv_name, unit_acc, unit_ref, unit_name) = match mobility_kind {
+            // (array term, unit cvRef, unit term); each term is an
+            // (accession, name) pair so tests/cv_terms.rs can check it.
+            let ((cv_acc, cv_name), unit_ref, (unit_acc, unit_name)) = match mobility_kind {
                 Some(MobilityArrayKind::DriftTimeMilliseconds) => (
-                    "MS:1003007",
-                    "raw ion mobility array",
-                    "UO:0000028",
+                    ("MS:1003007", "raw ion mobility array"),
                     "UO",
-                    "millisecond",
+                    ("UO:0000028", "millisecond"),
                 ),
                 Some(MobilityArrayKind::InverseReducedVsPerCm2) | None => (
-                    "MS:1003008",
-                    "raw inverse reduced ion mobility array",
-                    "MS:1002814",
+                    ("MS:1003008", "raw inverse reduced ion mobility array"),
                     "MS",
-                    "volt-second per square centimeter",
+                    ("MS:1002814", "volt-second per square centimeter"),
                 ),
             };
             writeln!(
@@ -1474,7 +1472,7 @@ mod tests {
     #[test]
     fn additional_processing_steps_appended_in_order_after_conversion_step() {
         let mut src = ToySource::new();
-        src.extra_processing = vec![("MS:1000035", "peak picking"), ("MS:1001485", "smoothing")];
+        src.extra_processing = vec![("MS:1000035", "peak picking"), ("MS:1000592", "smoothing")];
         let mut buf = Vec::new();
         write_mzml(&mut src, &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
@@ -1489,7 +1487,7 @@ mod tests {
             r#"<cvParam cvRef="MS" accession="MS:1000035" name="peak picking" value=""/>"#
         ));
         assert!(
-            s.contains(r#"<cvParam cvRef="MS" accession="MS:1001485" name="smoothing" value=""/>"#)
+            s.contains(r#"<cvParam cvRef="MS" accession="MS:1000592" name="smoothing" value=""/>"#)
         );
     }
 
