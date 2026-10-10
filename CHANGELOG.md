@@ -6,6 +6,8 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-10-10
+
 ### Fixed
 
 - mzML writer: normalized collision energy is now `MS:1000138` with unit
