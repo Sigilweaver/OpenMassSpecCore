@@ -28,7 +28,15 @@ documentation = "https://docs.rs/openmassspec-core"
 keywords = ["mass-spectrometry", "mzml", "proteomics", "metabolomics", "psi-ms"]
 categories = ["science", "encoding"]
 readme = "README.md"
-exclude = ["/crates", "/.github"]
+include = [
+    "/src",
+    "/tests",
+    "/examples",
+    "/schema",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+]
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]
