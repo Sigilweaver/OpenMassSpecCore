@@ -147,7 +147,7 @@ let summary = write_mzml_with_options(
 Arrow users replace the `arrow` feature with the `openmassspec-arrow` crate
 and `openmassspec_core::arrow::` with `openmassspec_arrow::`.
 
-## [2.0.1] - Unreleased
+## [2.0.1] - 2026-10-10
 
 ### Fixed
 
