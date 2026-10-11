@@ -4,7 +4,9 @@ All notable changes to `openmassspec-core` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 crate adheres to [Semantic Versioning](https://semver.org/).
 
-## [3.0.0] - Unreleased
+## [Unreleased]
+
+## [3.0.0] - 2026-10-11
 
 This release is intended to be the last breaking release of the core API:
 public types are `#[non_exhaustive]`, so later field, variant, and CV-term
