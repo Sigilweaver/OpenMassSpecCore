@@ -6,22 +6,33 @@
 //!
 //! Binary data arrays (`m/z`, intensity, and per-peak ion mobility, plus
 //! chromatogram time/intensity) are zlib-compressed (`MS:1000574`) by
-//! default, matching msconvert/OpenMS output; use
-//! [`write_mzml_with_compression`]/[`write_indexed_mzml_with_compression`]
-//! to write uncompressed (`MS:1000576`) arrays instead.
+//! default, matching msconvert/OpenMS output; set
+//! [`WriteOptions::with_compression`] to write uncompressed (`MS:1000576`)
+//! arrays instead.
 //!
-//! The writer is vendor-neutral. All vendor-specific decisions (the
-//! source-file CV term, the native-ID format CV term, the instrument CV term,
-//! the per-scan `native_id` strings) come from the source's
-//! [`RunMetadata`](crate::RunMetadata) and from each
-//! [`SpectrumRecord::native_id`](crate::SpectrumRecord).
+//! Record errors: by default the writer stops at the first `Err` the source
+//! yields and returns it, leaving a truncated document in `out`. With
+//! [`RecordErrorPolicy::Skip`] it leaves failed records out, counts them, and
+//! reports the counts in the returned [`WriteSummary`].
+//!
+//! Every PSI-MS / UO term the writer emits on its own comes from the typed
+//! constants in [`crate::cv`], so accession and name cannot disagree.
+//! Vendor-specific terms (the source-file format, the native-ID format, the
+//! instrument, chromatogram types) come from the source's
+//! [`RunMetadata`](crate::RunMetadata) and records as [`CvTerm`] values.
 
-use std::io::{Result, Write};
+use std::fmt::Display;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufWriter, Seek, SeekFrom, Write};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use flate2::write::ZlibEncoder;
 use flate2::Compression as ZlibLevel;
 
+use crate::cv::{self, Term};
 use crate::enums::{Activation, Analyzer, Compression, MobilityArrayKind, Polarity, ScanMode};
+use crate::error::Result;
 use crate::source::SpectrumSource;
 use crate::types::{ChromatogramRecord, CvTerm, RunMetadata, SpectrumRecord};
 
@@ -188,17 +199,17 @@ fn zlib_compress(data: &[u8]) -> Vec<u8> {
         .expect("in-memory zlib compression cannot fail")
 }
 
-/// The `MS:1000574`/`MS:1000576` cvParam accession + name pair for a
-/// `<binaryDataArray>`, matching whatever bytes [`encode_bytes`] wrote.
-fn compression_cv(compression: Compression) -> (&'static str, &'static str) {
+/// The `MS:1000574`/`MS:1000576` term for a `<binaryDataArray>`, matching
+/// whatever bytes [`encode_bytes`] wrote.
+fn compression_term(compression: Compression) -> Term {
     match compression {
-        Compression::NoCompression => ("MS:1000576", "no compression"),
-        Compression::Zlib => ("MS:1000574", "zlib compression"),
+        Compression::NoCompression => cv::NO_COMPRESSION,
+        Compression::Zlib => cv::ZLIB_COMPRESSION,
     }
 }
 
 /// Base64-encode `data`, zlib-compressing it first when `compression`
-/// requests it. Pair with [`compression_cv`] so the emitted cvParam always
+/// requests it. Pair with [`compression_term`] so the emitted cvParam always
 /// matches the bytes actually written.
 fn encode_bytes(data: &[u8], compression: Compression) -> String {
     match compression {
@@ -225,165 +236,433 @@ fn escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-type CvPair = (&'static str, &'static str);
+// ---------- cvParam emission -------------------------------------------------
 
-const BEAM_CID: CvPair = ("MS:1000422", "beam-type collision-induced dissociation");
-const CID: CvPair = ("MS:1000133", "collision-induced dissociation");
-const ETD: CvPair = ("MS:1000598", "electron transfer dissociation");
+/// `<cvParam>` for a generated term. `value` must already be XML-escaped.
+fn cv_param<W: Write>(
+    out: &mut W,
+    indent: &str,
+    term: Term,
+    value: impl Display,
+) -> io::Result<()> {
+    writeln!(
+        out,
+        r#"{indent}<cvParam cvRef="{}" accession="{}" name="{}" value="{value}"/>"#,
+        term.cv_ref(),
+        term.accession(),
+        term.name()
+    )
+}
 
-/// PSI-MS dissociation-method cvParams for an [`Activation`]. Every pair
-/// here is checked against the PSI-MS OBO by `tests/cv_terms.rs`.
+/// `<cvParam>` for a generated term with a unit. `value` must already be
+/// XML-escaped.
+fn cv_param_with_unit<W: Write>(
+    out: &mut W,
+    indent: &str,
+    term: Term,
+    value: impl Display,
+    unit: Term,
+) -> io::Result<()> {
+    writeln!(
+        out,
+        r#"{indent}<cvParam cvRef="{}" accession="{}" name="{}" value="{value}" unitCvRef="{}" unitAccession="{}" unitName="{}"/>"#,
+        term.cv_ref(),
+        term.accession(),
+        term.name(),
+        unit.cv_ref(),
+        unit.accession(),
+        unit.name()
+    )
+}
+
+/// `<cvParam value="">` for a caller-supplied [`CvTerm`].
+fn cv_term_param<W: Write>(out: &mut W, indent: &str, term: &CvTerm) -> io::Result<()> {
+    let cv_ref = if term.accession.starts_with("UO:") {
+        "UO"
+    } else {
+        "MS"
+    };
+    writeln!(
+        out,
+        r#"{indent}<cvParam cvRef="{cv_ref}" accession="{}" name="{}" value=""/>"#,
+        escape(&term.accession),
+        escape(&term.name)
+    )
+}
+
+/// PSI-MS dissociation-method terms for an [`Activation`].
 ///
 /// An empty slice means no PSI-MS term is a faithful match, so the writer
 /// emits no dissociation-method cvParam rather than guessing.
-fn activation_cv(act: Activation, analyzer: Option<Analyzer>) -> &'static [CvPair] {
+fn activation_terms(act: Activation, analyzer: Option<Analyzer>) -> &'static [Term] {
     match act {
-        Activation::HCD => &[BEAM_CID],
-        Activation::ETD => &[ETD],
+        Activation::HCD => &[cv::BEAM_TYPE_COLLISION_INDUCED_DISSOCIATION],
+        Activation::ETD => &[cv::ELECTRON_TRANSFER_DISSOCIATION],
         // ETD plus the combined EThcD term, so readers that only look for
         // ETD keep working while the supplemental HCD step is recorded.
         Activation::EThcD => &[
-            ETD,
-            (
-                "MS:1002631",
-                "electron-transfer/higher-energy collision dissociation",
-            ),
+            cv::ELECTRON_TRANSFER_DISSOCIATION,
+            cv::ELECTRON_TRANSFER_HIGHER_ENERGY_COLLISION_DISSOCIATION,
         ],
         Activation::CID => match analyzer {
-            Some(Analyzer::FTMS) => &[BEAM_CID],
-            _ => &[CID],
+            Some(Analyzer::FTMS) => &[cv::BEAM_TYPE_COLLISION_INDUCED_DISSOCIATION],
+            _ => &[cv::COLLISION_INDUCED_DISSOCIATION],
         },
         // MS:1000435 carries the exact synonyms "multiphoton dissociation"
         // and "MPD" in the PSI-MS CV.
-        Activation::MPID => &[("MS:1000435", "photodissociation")],
-        Activation::ECD => &[("MS:1000250", "electron capture dissociation")],
-        Activation::IRMPD => &[("MS:1000262", "infrared multiphoton dissociation")],
+        Activation::MPID => &[cv::PHOTODISSOCIATION],
+        Activation::ECD => &[cv::ELECTRON_CAPTURE_DISSOCIATION],
+        Activation::IRMPD => &[cv::INFRARED_MULTIPHOTON_DISSOCIATION],
         // "Proton transfer decay / activated-ion" has no matching PSI-MS
-        // dissociation term (MS:1001880 in-source CID describes something
-        // else entirely), so emit nothing.
+        // dissociation term, so emit nothing.
         Activation::PD => &[],
-        Activation::PQD => &[("MS:1000599", "pulsed q dissociation")],
-        Activation::UVPD => &[("MS:1003246", "ultraviolet photodissociation")],
-        Activation::SID => &[("MS:1000136", "surface-induced dissociation")],
+        Activation::PQD => &[cv::PULSED_Q_DISSOCIATION],
+        Activation::UVPD => &[cv::ULTRAVIOLET_PHOTODISSOCIATION],
+        Activation::SID => &[cv::SURFACE_INDUCED_DISSOCIATION],
+    }
+}
+
+// ---------- spectrum spool --------------------------------------------------
+
+/// Bytes of spooled `<spectrum>` elements kept in memory before the spool
+/// moves to a temporary file.
+const SPOOL_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+
+/// Holds the written `<spectrum>` elements until the final count is known,
+/// so `<spectrumList count>` can be written before them. Small runs stay in
+/// memory; larger ones spill to a temporary file that is removed on drop.
+struct Spool {
+    len: u64,
+    /// In-memory bytes allowed before spilling to a file.
+    memory_limit: usize,
+    dir: PathBuf,
+    state: SpoolState,
+}
+
+enum SpoolState {
+    Memory(Vec<u8>),
+    File(BufWriter<File>, TempPath),
+}
+
+/// A temporary file path. [`TempPath::remove`] deletes it and reports
+/// failure; dropping it without that (a write that is already returning an
+/// error) deletes it best-effort, since that error is the one to report.
+struct TempPath(Option<PathBuf>);
+
+impl TempPath {
+    fn path(&self) -> &std::path::Path {
+        self.0.as_deref().expect("spool path present until removed")
+    }
+
+    fn remove(mut self) -> io::Result<()> {
+        let path = self.0.take().expect("spool path present until removed");
+        fs::remove_file(&path).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("cannot remove spool file {}: {e}", path.display()),
+            )
+        })
+    }
+}
+
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+impl Spool {
+    fn new(dir: PathBuf, memory_limit: usize) -> Self {
+        Self {
+            len: 0,
+            memory_limit,
+            dir,
+            state: SpoolState::Memory(Vec::new()),
+        }
+    }
+
+    fn spill(&mut self) -> io::Result<()> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let SpoolState::Memory(buf) = &mut self.state else {
+            return Ok(());
+        };
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let path = self.dir.join(format!(
+            "openmassspec-spool-{}-{nanos}-{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("cannot create spool file {}: {e}", path.display()),
+                )
+            })?;
+        let path = TempPath(Some(path));
+        let mut file = BufWriter::with_capacity(1 << 20, file);
+        file.write_all(buf)?;
+        self.state = SpoolState::File(file, path);
+        Ok(())
+    }
+
+    /// Copy everything spooled into `out`.
+    fn copy_into<W: Write>(self, out: &mut W) -> io::Result<()> {
+        match self.state {
+            SpoolState::Memory(buf) => out.write_all(&buf),
+            SpoolState::File(file, path) => {
+                let mut file = file.into_inner().map_err(|e| e.into_error())?;
+                file.seek(SeekFrom::Start(0))?;
+                // The reader (and the file handle) is dropped at the end of
+                // this statement, so the file can be removed on any OS.
+                let copied = io::copy(&mut io::BufReader::with_capacity(1 << 20, file), out)?;
+                if copied != self.len {
+                    return Err(io::Error::other(format!(
+                        "spool file {} returned {copied} of {} bytes",
+                        path.path().display(),
+                        self.len
+                    )));
+                }
+                path.remove()
+            }
+        }
+    }
+}
+
+impl Write for Spool {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let SpoolState::Memory(mem) = &self.state {
+            if mem.len() + buf.len() > self.memory_limit {
+                self.spill()?;
+            }
+        }
+        let n = match &mut self.state {
+            SpoolState::Memory(mem) => {
+                mem.extend_from_slice(buf);
+                buf.len()
+            }
+            SpoolState::File(file, _) => file.write(buf)?,
+        };
+        self.len += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match &mut self.state {
+            SpoolState::Memory(_) => Ok(()),
+            SpoolState::File(file, _) => file.flush(),
+        }
+    }
+}
+
+// ---------- options and summary ----------------------------------------------
+
+/// What the writer does when the source yields an `Err` record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum RecordErrorPolicy {
+    /// Stop and return the error. The document in `out` is truncated.
+    #[default]
+    Fail,
+    /// Leave the failed record out and keep writing. Each skipped record is
+    /// counted in [`WriteSummary`]. The written document stays valid: the
+    /// `<spectrumList count>` / `<chromatogramList count>` attributes give
+    /// the number of elements actually written, and their `index`
+    /// attributes are consecutive from 0 in written order.
+    Skip,
+}
+
+/// Options for [`write_mzml_with_options`] and
+/// [`write_indexed_mzml_with_options`].
+///
+/// ```
+/// use openmassspec_core::{Compression, RecordErrorPolicy, WriteOptions};
+///
+/// let opts = WriteOptions::new()
+///     .with_compression(Compression::NoCompression)
+///     .with_record_error_policy(RecordErrorPolicy::Skip);
+/// assert_eq!(opts.record_error_policy, RecordErrorPolicy::Skip);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WriteOptions {
+    /// Binary-data-array codec. Defaults to [`Compression::Zlib`].
+    pub compression: Compression,
+    /// Handling of `Err` records. Defaults to [`RecordErrorPolicy::Fail`].
+    pub record_error_policy: RecordErrorPolicy,
+    /// Directory for the temporary file that holds written spectra once
+    /// they pass 64 MiB (see [`write_mzml_with_options`]). `None`, the
+    /// default, uses [`std::env::temp_dir`].
+    pub spool_dir: Option<PathBuf>,
+}
+
+impl WriteOptions {
+    /// Default options: zlib compression, stop at the first record error.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the binary-data-array codec.
+    #[must_use]
+    pub fn with_compression(mut self, compression: Compression) -> Self {
+        self.compression = compression;
+        self
+    }
+
+    /// Set the record-error policy.
+    #[must_use]
+    pub fn with_record_error_policy(mut self, policy: RecordErrorPolicy) -> Self {
+        self.record_error_policy = policy;
+        self
+    }
+
+    /// Set the directory for the spectrum spool file.
+    #[must_use]
+    pub fn with_spool_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.spool_dir = Some(dir.into());
+        self
+    }
+}
+
+/// What a successful write produced.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WriteSummary {
+    /// `<spectrum>` elements written.
+    pub spectra_written: usize,
+    /// Spectra left out because the source yielded `Err` (only with
+    /// [`RecordErrorPolicy::Skip`]).
+    pub spectra_skipped: usize,
+    /// `<chromatogram>` elements written.
+    pub chromatograms_written: usize,
+    /// Chromatograms left out because the source yielded `Err` (only with
+    /// [`RecordErrorPolicy::Skip`]).
+    pub chromatograms_skipped: usize,
+}
+
+impl WriteSummary {
+    /// Total records skipped (spectra plus chromatograms).
+    pub fn skipped(&self) -> usize {
+        self.spectra_skipped + self.chromatograms_skipped
     }
 }
 
 // ---------- public entry points --------------------------------------------
 
-/// Write the source's spectra as mzML 1.1.0 (un-indexed), zlib-compressing
-/// binary data arrays (`MS:1000574`). Use [`write_mzml_with_compression`] to
-/// choose a different codec.
-pub fn write_mzml<S: SpectrumSource + ?Sized, W: Write>(src: &mut S, out: &mut W) -> Result<()> {
-    write_mzml_with_compression(src, out, Compression::default())
-}
-
-/// Write the source's spectra as mzML 1.1.0 (un-indexed), with an explicit
-/// choice of binary-data-array [`Compression`].
-pub fn write_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>(
+/// Write the source's spectra as mzML 1.1.0 (un-indexed) with default
+/// [`WriteOptions`]: zlib-compressed arrays, stop at the first record error.
+///
+/// # Errors
+///
+/// Returns the first `Err` the source yields, or an I/O error from `out` or
+/// the spool file. `out` then holds an incomplete document.
+pub fn write_mzml<S: SpectrumSource + ?Sized, W: Write>(
     src: &mut S,
     out: &mut W,
-    compression: Compression,
-) -> Result<()> {
-    let meta = src.run_metadata();
-    let count = src.spectrum_count_hint().unwrap_or(0);
-    let mobility_kind = meta.mobility_array_kind;
-    let analyzer_ic_ids = analyzer_ic_table(&meta.analyzers);
-    let extra_processing = src.additional_processing_steps();
+) -> Result<WriteSummary> {
+    write_mzml_with_options(src, out, &WriteOptions::default())
+}
 
-    write_prologue(out, &meta, count, false, &extra_processing)?;
-    for rec in src.iter_spectra() {
-        out.write_all(RECORD_INDENT.as_bytes())?;
-        write_spectrum(out, &rec, mobility_kind, &analyzer_ic_ids, compression)?;
-    }
-    writeln!(out, r#"    </spectrumList>"#)?;
+/// Write the source's spectra as mzML 1.1.0 (un-indexed) with explicit
+/// [`WriteOptions`].
+///
+/// `<spectrumList count>` is the number of `<spectrum>` elements written,
+/// whatever [`SpectrumSource::spectrum_count_hint`] says, and each
+/// spectrum's `index` attribute is its 0-based position in the written list
+/// (the source's [`SpectrumRecord::index`] is not used; `id` carries the
+/// native id). To know the count before the list starts, the writer holds
+/// the encoded spectra until the source is exhausted: in memory up to
+/// 64 MiB, then in a temporary file in [`WriteOptions::spool_dir`] that is
+/// removed when the write ends. A large run therefore needs free space
+/// there about the size of the output.
+///
+/// # Errors
+///
+/// Returns an I/O error from `out` or the spool file, or the first `Err` the
+/// source yields unless `opts` selects [`RecordErrorPolicy::Skip`]. `out`
+/// then holds an incomplete document.
+pub fn write_mzml_with_options<S: SpectrumSource + ?Sized, W: Write>(
+    src: &mut S,
+    out: &mut W,
+    opts: &WriteOptions,
+) -> Result<WriteSummary> {
+    write_plain(src, out, opts, SPOOL_MEMORY_LIMIT)
+}
 
-    let chroms: Vec<ChromatogramRecord> = src.iter_chromatograms().collect();
-    if !chroms.is_empty() {
-        writeln!(
-            out,
-            r#"    <chromatogramList count="{}" defaultDataProcessingRef="dp1">"#,
-            chroms.len()
-        )?;
-        for rec in &chroms {
-            out.write_all(RECORD_INDENT.as_bytes())?;
-            write_chromatogram(out, rec, compression)?;
-        }
-        writeln!(out, r#"    </chromatogramList>"#)?;
-    }
-
-    writeln!(out, r#"  </run>"#)?;
-    writeln!(out, r#"</mzML>"#)?;
-    Ok(())
+fn write_plain<S: SpectrumSource + ?Sized, W: Write>(
+    src: &mut S,
+    out: &mut W,
+    opts: &WriteOptions,
+    spool_memory_limit: usize,
+) -> Result<WriteSummary> {
+    let mut cw = CountingWriter::new(out);
+    cw.hashing = false;
+    let body = write_body(src, &mut cw, opts, false, spool_memory_limit)?;
+    writeln!(cw, r#"</mzML>"#)?;
+    Ok(body.summary)
 }
 
 /// Write the source's spectra as indexed mzML 1.1.0 (with `<indexList>` and
-/// `<fileChecksum>` trailer), zlib-compressing binary data arrays
-/// (`MS:1000574`). Use [`write_indexed_mzml_with_compression`] to choose a
-/// different codec.
+/// `<fileChecksum>` trailer) with default [`WriteOptions`]: zlib-compressed
+/// arrays, stop at the first record error.
+///
+/// # Errors
+///
+/// Returns the first `Err` the source yields, or an I/O error from `out` or
+/// the spool file. `out` then holds an incomplete document.
 pub fn write_indexed_mzml<S: SpectrumSource + ?Sized, W: Write>(
     src: &mut S,
     out: &mut W,
-) -> Result<()> {
-    write_indexed_mzml_with_compression(src, out, Compression::default())
+) -> Result<WriteSummary> {
+    write_indexed_mzml_with_options(src, out, &WriteOptions::default())
 }
 
 /// Write the source's spectra as indexed mzML 1.1.0 (with `<indexList>` and
-/// `<fileChecksum>` trailer), with an explicit choice of binary-data-array
-/// [`Compression`].
+/// `<fileChecksum>` trailer) with explicit [`WriteOptions`].
 ///
 /// The `<fileChecksum>` SHA-1 is computed over the bytes actually written to
 /// `out`, from the start of the document up to and including the
 /// `<fileChecksum>` open tag, as mzML 1.1 specifies. Each `<offset>` and the
-/// `<indexListOffset>` give the byte position of the element's `<`.
-pub fn write_indexed_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>(
+/// `<indexListOffset>` give the byte position of the element's `<`. Skipped
+/// records have no index entry. List counts, `index` attributes, and the
+/// spectrum spool work as in [`write_mzml_with_options`].
+///
+/// # Errors
+///
+/// Returns an I/O error from `out` or the spool file, or the first `Err` the
+/// source yields unless `opts` selects [`RecordErrorPolicy::Skip`]. `out`
+/// then holds an incomplete document.
+pub fn write_indexed_mzml_with_options<S: SpectrumSource + ?Sized, W: Write>(
     src: &mut S,
     out: &mut W,
-    compression: Compression,
-) -> Result<()> {
-    let meta = src.run_metadata();
-    let count = src.spectrum_count_hint().unwrap_or(0);
-    let mobility_kind = meta.mobility_array_kind;
-    let analyzer_ic_ids = analyzer_ic_table(&meta.analyzers);
-    let extra_processing = src.additional_processing_steps();
+    opts: &WriteOptions,
+) -> Result<WriteSummary> {
+    write_indexed(src, out, opts, SPOOL_MEMORY_LIMIT)
+}
 
+fn write_indexed<S: SpectrumSource + ?Sized, W: Write>(
+    src: &mut S,
+    out: &mut W,
+    opts: &WriteOptions,
+    spool_memory_limit: usize,
+) -> Result<WriteSummary> {
     let mut cw = CountingWriter::new(out);
-    write_prologue(&mut cw, &meta, count, true, &extra_processing)?;
-
-    let mut offsets: Vec<(String, u64)> = Vec::with_capacity(count);
-    for rec in src.iter_spectra() {
-        // Offsets point at the element's `<`, so write the indent first.
-        cw.write_all(RECORD_INDENT.as_bytes())?;
-        offsets.push((rec.native_id.clone(), cw.pos));
-        write_spectrum(&mut cw, &rec, mobility_kind, &analyzer_ic_ids, compression)?;
-    }
-
-    writeln!(cw, r#"    </spectrumList>"#)?;
-
-    let chroms: Vec<ChromatogramRecord> = src.iter_chromatograms().collect();
-    let mut chrom_offsets: Vec<(String, u64)> = Vec::with_capacity(chroms.len());
-    if !chroms.is_empty() {
-        writeln!(
-            cw,
-            r#"    <chromatogramList count="{}" defaultDataProcessingRef="dp1">"#,
-            chroms.len()
-        )?;
-        for rec in &chroms {
-            cw.write_all(RECORD_INDENT.as_bytes())?;
-            chrom_offsets.push((rec.id.clone(), cw.pos));
-            write_chromatogram(&mut cw, rec, compression)?;
-        }
-        writeln!(cw, r#"    </chromatogramList>"#)?;
-    }
-
-    writeln!(cw, r#"  </run>"#)?;
+    let body = write_body(src, &mut cw, opts, true, spool_memory_limit)?;
     writeln!(cw, r#"  </mzML>"#)?;
 
     cw.write_all(b"  ")?;
     let index_list_offset = cw.pos;
-    let n_indexes = 1 + usize::from(!chrom_offsets.is_empty());
+    let n_indexes = 1 + usize::from(!body.chromatogram_offsets.is_empty());
     writeln!(cw, r#"<indexList count="{n_indexes}">"#)?;
     writeln!(cw, r#"    <index name="spectrum">"#)?;
-    for (id, offset) in &offsets {
+    for (id, offset) in &body.spectrum_offsets {
         writeln!(
             cw,
             r#"      <offset idRef="{}">{}</offset>"#,
@@ -392,9 +671,9 @@ pub fn write_indexed_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>
         )?;
     }
     writeln!(cw, r#"    </index>"#)?;
-    if !chrom_offsets.is_empty() {
+    if !body.chromatogram_offsets.is_empty() {
         writeln!(cw, r#"    <index name="chromatogram">"#)?;
-        for (id, offset) in &chrom_offsets {
+        for (id, offset) in &body.chromatogram_offsets {
             writeln!(
                 cw,
                 r#"      <offset idRef="{}">{}</offset>"#,
@@ -419,7 +698,110 @@ pub fn write_indexed_mzml_with_compression<S: SpectrumSource + ?Sized, W: Write>
     let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
     writeln!(cw, r#"{}</fileChecksum>"#, hex)?;
     writeln!(cw, r#"</indexedmzML>"#)?;
-    Ok(())
+    Ok(body.summary)
+}
+
+/// Output of [`write_body`]: counts plus, for indexed output, the byte
+/// offset of every written record.
+struct Body {
+    summary: WriteSummary,
+    spectrum_offsets: Vec<(String, u64)>,
+    chromatogram_offsets: Vec<(String, u64)>,
+}
+
+/// Write everything from the XML declaration through `</run>`.
+fn write_body<S: SpectrumSource + ?Sized, W: Write>(
+    src: &mut S,
+    cw: &mut CountingWriter<'_, W>,
+    opts: &WriteOptions,
+    indexed: bool,
+    spool_memory_limit: usize,
+) -> Result<Body> {
+    let meta = src.run_metadata();
+    let ids = DocumentIds::new(&meta);
+    let mobility_kind = meta.mobility_array_kind;
+    let analyzer_ic_ids = analyzer_ic_table(&meta.analyzers);
+    let extra_processing = src.additional_processing_steps();
+    let compression = opts.compression;
+    let skip = opts.record_error_policy == RecordErrorPolicy::Skip;
+
+    write_prologue(cw, &meta, &ids, indexed, &extra_processing)?;
+
+    // Spectra go to the spool first so `<spectrumList count>` can be the
+    // number actually written. Offsets are relative to the spool until it
+    // is copied into `cw`.
+    let spool_dir = opts.spool_dir.clone().unwrap_or_else(std::env::temp_dir);
+    let mut spool = Spool::new(spool_dir, spool_memory_limit);
+    let mut summary = WriteSummary::default();
+    let mut spectrum_offsets = Vec::new();
+    for item in src.iter_spectra() {
+        let rec = match item {
+            Ok(rec) => rec,
+            Err(_) if skip => {
+                summary.spectra_skipped += 1;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        // Offsets point at the element's `<`, so write the indent first.
+        spool.write_all(RECORD_INDENT.as_bytes())?;
+        if indexed {
+            spectrum_offsets.push((rec.native_id.clone(), spool.len));
+        }
+        write_spectrum(
+            &mut spool,
+            &rec,
+            summary.spectra_written,
+            mobility_kind,
+            &analyzer_ic_ids,
+            compression,
+        )?;
+        summary.spectra_written += 1;
+    }
+    writeln!(
+        cw,
+        r#"    <spectrumList count="{}" defaultDataProcessingRef="dp1">"#,
+        summary.spectra_written
+    )?;
+    let spool_start = cw.pos;
+    spool.copy_into(cw)?;
+    for (_, offset) in &mut spectrum_offsets {
+        *offset += spool_start;
+    }
+    writeln!(cw, r#"    </spectrumList>"#)?;
+
+    let mut chroms = Vec::new();
+    for item in src.iter_chromatograms() {
+        match item {
+            Ok(rec) => chroms.push(rec),
+            Err(_) if skip => summary.chromatograms_skipped += 1,
+            Err(e) => return Err(e),
+        }
+    }
+    let mut chromatogram_offsets = Vec::new();
+    if !chroms.is_empty() {
+        writeln!(
+            cw,
+            r#"    <chromatogramList count="{}" defaultDataProcessingRef="dp1">"#,
+            chroms.len()
+        )?;
+        for rec in &chroms {
+            cw.write_all(RECORD_INDENT.as_bytes())?;
+            if indexed {
+                chromatogram_offsets.push((rec.id.clone(), cw.pos));
+            }
+            write_chromatogram(cw, rec, summary.chromatograms_written, compression)?;
+            summary.chromatograms_written += 1;
+        }
+        writeln!(cw, r#"    </chromatogramList>"#)?;
+    }
+
+    writeln!(cw, r#"  </run>"#)?;
+    Ok(Body {
+        summary,
+        spectrum_offsets,
+        chromatogram_offsets,
+    })
 }
 
 // ---------- prologue / spectrum body ---------------------------------------
@@ -432,13 +814,69 @@ const RECORD_INDENT: &str = "      ";
 /// Fixed `xs:ID` of the acquisition-software `<software>` entry.
 const ACQUISITION_SOFTWARE_ID: &str = "acquisition_software";
 
+/// The `xs:ID` values derived from run metadata.
+struct DocumentIds {
+    /// `<software id>` of the reader software, also every
+    /// `processingMethod softwareRef`.
+    software: String,
+    /// `<run id>`.
+    run: String,
+}
+
+impl DocumentIds {
+    fn new(meta: &RunMetadata) -> Self {
+        let software = unique_ncname(&meta.software_name, "software_", is_fixed_id);
+        let run = unique_ncname(&meta.source_file_name, "run_", |id| {
+            is_fixed_id(id) || id == software
+        });
+        Self { software, run }
+    }
+}
+
+/// Ids the writer emits as fixed literals.
+fn is_fixed_id(id: &str) -> bool {
+    id == "sf1"
+        || id == "dp1"
+        || id == ACQUISITION_SOFTWARE_ID
+        || (id.starts_with("IC") && id[2..].parse::<usize>().is_ok())
+}
+
+/// Turn `raw` into an XML NCName (as `xs:ID` requires) that `taken` rejects.
+///
+/// Characters outside `[A-Za-z0-9._-]` become `_`. `prefix` (which starts
+/// with a letter) is prepended while the result does not start with a letter
+/// or `_`, or is taken. Names that are already valid and free pass through
+/// unchanged.
+fn unique_ncname(raw: &str, prefix: &str, taken: impl Fn(&str) -> bool) -> String {
+    let mut id: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    loop {
+        let starts_ok = id
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        if starts_ok && !taken(&id) {
+            return id;
+        }
+        id.insert_str(0, prefix);
+    }
+}
+
 fn write_prologue<W: Write>(
     out: &mut W,
     meta: &RunMetadata,
-    n_spectra: usize,
+    ids: &DocumentIds,
     indexed: bool,
-    extra_processing: &[(&'static str, &'static str)],
-) -> Result<()> {
+    extra_processing: &[CvTerm],
+) -> io::Result<()> {
     writeln!(out, r#"<?xml version="1.0" encoding="utf-8"?>"#)?;
     if indexed {
         writeln!(out, r#"<indexedmzML xmlns="http://psi.hupo.org/ms/mzml""#)?;
@@ -470,10 +908,14 @@ fn write_prologue<W: Write>(
         writeln!(out, r#"      version="1.1.0">"#)?;
     }
 
+    // The MS entry names the exact psi-ms.obo release `crate::cv` was
+    // generated from; the UO terms the writer uses come from the same file.
     writeln!(out, r#"  <cvList count="2">"#)?;
     writeln!(
         out,
-        r#"    <cv id="MS" fullName="Proteomics Standards Initiative Mass Spectrometry Ontology" version="4.1.100" URI="https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo"/>"#
+        r#"    <cv id="MS" fullName="Proteomics Standards Initiative Mass Spectrometry Ontology" version="{}" URI="{}"/>"#,
+        cv::PSI_MS_VERSION,
+        cv::PSI_MS_SOURCE_URL
     )?;
     writeln!(
         out,
@@ -483,14 +925,8 @@ fn write_prologue<W: Write>(
 
     writeln!(out, r#"  <fileDescription>"#)?;
     writeln!(out, r#"    <fileContent>"#)?;
-    writeln!(
-        out,
-        r#"      <cvParam cvRef="MS" accession="MS:1000579" name="MS1 spectrum" value=""/>"#
-    )?;
-    writeln!(
-        out,
-        r#"      <cvParam cvRef="MS" accession="MS:1000580" name="MSn spectrum" value=""/>"#
-    )?;
+    cv_param(out, "      ", cv::MS1_SPECTRUM, "")?;
+    cv_param(out, "      ", cv::MSN_SPECTRUM, "")?;
     writeln!(out, r#"    </fileContent>"#)?;
     writeln!(out, r#"    <sourceFileList count="1">"#)?;
     writeln!(
@@ -498,8 +934,8 @@ fn write_prologue<W: Write>(
         r#"      <sourceFile id="sf1" name="{}" location="">"#,
         escape(&meta.source_file_name)
     )?;
-    write_cv(out, "        ", &meta.source_file_format)?;
-    write_cv(out, "        ", &meta.native_id_format)?;
+    cv_term_param(out, "        ", &meta.source_file_format)?;
+    cv_term_param(out, "        ", &meta.native_id_format)?;
     writeln!(out, r#"      </sourceFile>"#)?;
     writeln!(out, r#"    </sourceFileList>"#)?;
     writeln!(out, r#"  </fileDescription>"#)?;
@@ -512,21 +948,20 @@ fn write_prologue<W: Write>(
     writeln!(
         out,
         r#"    <software id="{}" version="{}">"#,
-        escape(&meta.software_name),
+        ids.software,
         escape(&meta.software_version)
     )?;
-    writeln!(
+    cv_param(
         out,
-        r#"      <cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="{}"/>"#,
-        escape(&meta.software_name)
+        "      ",
+        cv::CUSTOM_UNRELEASED_SOFTWARE_TOOL,
+        escape(&meta.software_name),
     )?;
     writeln!(out, r#"    </software>"#)?;
     if let Some(name) = &meta.acquisition_software_name {
-        // A fixed id (rather than one derived from `name`) because `name`
-        // comes from vendor metadata and is not guaranteed to be a valid
-        // XML `xs:ID` (e.g. "Xcalibur 4.4" contains a space). No
-        // `processingMethod` references this software, so a fixed id has no
-        // downstream effect.
+        // A fixed id (rather than one derived from `name`): no
+        // `processingMethod` references this software, so the id only has
+        // to be unique and valid.
         writeln!(
             out,
             r#"    <software id="{ACQUISITION_SOFTWARE_ID}" version="{}">"#,
@@ -536,10 +971,11 @@ fn write_prologue<W: Write>(
         // mapping vendor-reported names to accessions would need every
         // string verified against the CV, so use the generic term and keep
         // the real name as the value.
-        writeln!(
+        cv_param(
             out,
-            r#"      <cvParam cvRef="MS" accession="MS:1000799" name="custom unreleased software tool" value="{}"/>"#,
-            escape(name)
+            "      ",
+            cv::CUSTOM_UNRELEASED_SOFTWARE_TOOL,
+            escape(name),
         )?;
         writeln!(out, r#"    </software>"#)?;
     }
@@ -551,23 +987,15 @@ fn write_prologue<W: Write>(
         1 + meta.analyzers.len()
     )?;
     writeln!(out, r#"    <instrumentConfiguration id="IC1">"#)?;
-    write_cv(out, "      ", &meta.instrument)?;
+    cv_term_param(out, "      ", &meta.instrument)?;
     if let Some(serial) = &meta.instrument_serial_number {
-        writeln!(
-            out,
-            r#"      <cvParam cvRef="MS" accession="MS:1000529" name="instrument serial number" value="{}"/>"#,
-            escape(serial)
-        )?;
+        cv_param(out, "      ", cv::INSTRUMENT_SERIAL_NUMBER, escape(serial))?;
     }
     writeln!(out, r#"    </instrumentConfiguration>"#)?;
     for (analyzer, id) in analyzer_ic_table(&meta.analyzers) {
-        let (acc, name) = analyzer_cv(analyzer);
         writeln!(out, r#"    <instrumentConfiguration id="{id}">"#)?;
-        write_cv(out, "      ", &meta.instrument)?;
-        writeln!(
-            out,
-            r#"      <cvParam cvRef="MS" accession="{acc}" name="{name}" value=""/>"#
-        )?;
+        cv_term_param(out, "      ", &meta.instrument)?;
+        cv_param(out, "      ", analyzer_term(analyzer), "")?;
         writeln!(out, r#"    </instrumentConfiguration>"#)?;
     }
     writeln!(out, r#"  </instrumentConfigurationList>"#)?;
@@ -577,34 +1005,28 @@ fn write_prologue<W: Write>(
     writeln!(
         out,
         r#"      <processingMethod order="0" softwareRef="{}">"#,
-        escape(&meta.software_name)
+        ids.software
     )?;
-    writeln!(
-        out,
-        r#"        <cvParam cvRef="MS" accession="MS:1000544" name="Conversion to mzML" value=""/>"#
-    )?;
+    cv_param(out, "        ", cv::CONVERSION_TO_MZML, "")?;
     writeln!(out, r#"      </processingMethod>"#)?;
     // Adapters that transform spectra before they reach the writer (e.g.
     // `Centroided` peak-picking) contribute additional steps here so the
     // file's processing history stays consistent with what was actually
     // done to the data (see `SpectrumSource::additional_processing_steps`).
-    for (order, (accession, name)) in extra_processing.iter().enumerate() {
+    for (order, term) in extra_processing.iter().enumerate() {
         writeln!(
             out,
             r#"      <processingMethod order="{}" softwareRef="{}">"#,
             order + 1,
-            escape(&meta.software_name)
+            ids.software
         )?;
-        writeln!(
-            out,
-            r#"        <cvParam cvRef="MS" accession="{accession}" name="{name}" value=""/>"#
-        )?;
+        cv_term_param(out, "        ", term)?;
         writeln!(out, r#"      </processingMethod>"#)?;
     }
     writeln!(out, r#"    </dataProcessing>"#)?;
     writeln!(out, r#"  </dataProcessingList>"#)?;
 
-    let run_id = run_id(meta);
+    let run_id = &ids.run;
     match &meta.start_timestamp {
         Some(ts) => writeln!(
             out,
@@ -624,62 +1046,22 @@ fn write_prologue<W: Write>(
             escape(value)
         )?;
     }
-    writeln!(
-        out,
-        r#"    <spectrumList count="{}" defaultDataProcessingRef="dp1">"#,
-        n_spectra
-    )?;
     Ok(())
 }
 
-/// Derive the `<run id>` from the source file name. `id` is an `xs:ID`, so it
-/// must be an XML NCName: a file name such as `20260101_sample.raw` (leading
-/// digit) or one containing spaces would otherwise fail schema validation.
-///
-/// Characters outside `[A-Za-z0-9._-]` become `_`. A `run_` prefix is added
-/// when the result does not start with a letter or `_`, or when it would
-/// collide with another fixed id in the document. Names that are already
-/// valid pass through unchanged.
-fn run_id(meta: &RunMetadata) -> String {
-    let mut id: String = meta
-        .source_file_name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let starts_ok = id
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
-    let collides = id == "sf1"
-        || id == "dp1"
-        || id == ACQUISITION_SOFTWARE_ID
-        || id == meta.software_name
-        || (id.starts_with("IC") && id[2..].parse::<usize>().is_ok());
-    if !starts_ok || collides {
-        id.insert_str(0, "run_");
-    }
-    id
-}
-
-/// PSI-MS mass-analyzer-component CV term for each [`Analyzer`] variant.
+/// PSI-MS mass-analyzer-component term for each [`Analyzer`] variant.
 ///
 /// `FTMS` covers both Orbitrap and FT-ICR instruments (see the enum's own
 /// doc comment); this maps it to `orbitrap` since that is by far the more
 /// common physical analyzer behind a "FTMS" scan-filter token across the
 /// vendors this crate supports. FT-ICR instruments will be mislabeled.
-fn analyzer_cv(analyzer: Analyzer) -> (&'static str, &'static str) {
+fn analyzer_term(analyzer: Analyzer) -> Term {
     match analyzer {
-        Analyzer::ITMS => ("MS:1000264", "ion trap"),
-        Analyzer::TQMS | Analyzer::SQMS => ("MS:1000081", "quadrupole"),
-        Analyzer::TOFMS => ("MS:1000084", "time-of-flight"),
-        Analyzer::FTMS => ("MS:1000484", "orbitrap"),
-        Analyzer::Sector => ("MS:1000080", "magnetic sector"),
+        Analyzer::ITMS => cv::ION_TRAP,
+        Analyzer::TQMS | Analyzer::SQMS => cv::QUADRUPOLE,
+        Analyzer::TOFMS => cv::TIME_OF_FLIGHT,
+        Analyzer::FTMS => cv::ORBITRAP,
+        Analyzer::Sector => cv::MAGNETIC_SECTOR,
     }
 }
 
@@ -694,26 +1076,20 @@ fn analyzer_ic_table(analyzers: &[Analyzer]) -> Vec<(Analyzer, String)> {
         .collect()
 }
 
-fn write_cv<W: Write>(out: &mut W, indent: &str, cv: &CvTerm) -> Result<()> {
-    writeln!(
-        out,
-        r#"{indent}<cvParam cvRef="MS" accession="{}" name="{}" value=""/>"#,
-        cv.accession,
-        escape(&cv.name)
-    )
-}
-
+/// Write one `<spectrum>`. `index` is its position in the written list.
 fn write_spectrum<W: Write>(
     out: &mut W,
     rec: &SpectrumRecord,
+    index: usize,
     mobility_kind: Option<MobilityArrayKind>,
     analyzer_ic_ids: &[(Analyzer, String)],
     compression: Compression,
-) -> Result<()> {
+) -> io::Result<()> {
+    const I: &str = "        ";
     let spectrum_type = if rec.ms_level <= 1 {
-        ("MS:1000579", "MS1 spectrum")
+        cv::MS1_SPECTRUM
     } else {
-        ("MS:1000580", "MSn spectrum")
+        cv::MSN_SPECTRUM
     };
     let n_peaks = rec.mz.len();
 
@@ -727,40 +1103,20 @@ fn write_spectrum<W: Write>(
         out,
         r#"<spectrum id="{sid}" index="{idx}" defaultArrayLength="{n}">"#,
         sid = escape(&rec.native_id),
-        idx = rec.index,
+        idx = index,
         n = n_peaks
     )?;
-    writeln!(
-        out,
-        r#"        <cvParam cvRef="MS" accession="MS:1000511" name="ms level" value="{}"/>"#,
-        rec.ms_level
-    )?;
-    writeln!(
-        out,
-        r#"        <cvParam cvRef="MS" accession="{}" name="{}" value=""/>"#,
-        spectrum_type.0, spectrum_type.1
-    )?;
+    cv_param(out, I, cv::MS_LEVEL, rec.ms_level)?;
+    cv_param(out, I, spectrum_type, "")?;
 
     match rec.scan_mode {
-        Some(ScanMode::Centroid) => writeln!(
-            out,
-            r#"        <cvParam cvRef="MS" accession="MS:1000127" name="centroid spectrum" value=""/>"#
-        )?,
-        _ => writeln!(
-            out,
-            r#"        <cvParam cvRef="MS" accession="MS:1000128" name="profile spectrum" value=""/>"#
-        )?,
+        Some(ScanMode::Centroid) => cv_param(out, I, cv::CENTROID_SPECTRUM, "")?,
+        _ => cv_param(out, I, cv::PROFILE_SPECTRUM, "")?,
     }
 
     match rec.polarity {
-        Some(Polarity::Positive) => writeln!(
-            out,
-            r#"        <cvParam cvRef="MS" accession="MS:1000130" name="positive scan" value=""/>"#
-        )?,
-        Some(Polarity::Negative) => writeln!(
-            out,
-            r#"        <cvParam cvRef="MS" accession="MS:1000129" name="negative scan" value=""/>"#
-        )?,
+        Some(Polarity::Positive) => cv_param(out, I, cv::POSITIVE_SCAN, "")?,
+        Some(Polarity::Negative) => cv_param(out, I, cv::NEGATIVE_SCAN, "")?,
         None => {}
     }
 
@@ -768,31 +1124,11 @@ fn write_spectrum<W: Write>(
     let (bp_mz, bp_int) = rec.effective_base_peak().unwrap_or((0.0, 0.0));
     let (lo_mz, hi_mz) = rec.effective_mz_range().unwrap_or((0.0, 0.0));
 
-    writeln!(
-        out,
-        r#"        <cvParam cvRef="MS" accession="MS:1000285" name="total ion current" value="{:.6}"/>"#,
-        tic
-    )?;
-    writeln!(
-        out,
-        r#"        <cvParam cvRef="MS" accession="MS:1000504" name="base peak m/z" value="{:.6}"/>"#,
-        bp_mz
-    )?;
-    writeln!(
-        out,
-        r#"        <cvParam cvRef="MS" accession="MS:1000505" name="base peak intensity" value="{:.6}"/>"#,
-        bp_int
-    )?;
-    writeln!(
-        out,
-        r#"        <cvParam cvRef="MS" accession="MS:1000528" name="lowest observed m/z" value="{:.6}"/>"#,
-        lo_mz
-    )?;
-    writeln!(
-        out,
-        r#"        <cvParam cvRef="MS" accession="MS:1000527" name="highest observed m/z" value="{:.6}"/>"#,
-        hi_mz
-    )?;
+    cv_param(out, I, cv::TOTAL_ION_CURRENT, format_args!("{tic:.6}"))?;
+    cv_param(out, I, cv::BASE_PEAK_MZ, format_args!("{bp_mz:.6}"))?;
+    cv_param(out, I, cv::BASE_PEAK_INTENSITY, format_args!("{bp_int:.6}"))?;
+    cv_param(out, I, cv::LOWEST_OBSERVED_MZ, format_args!("{lo_mz:.6}"))?;
+    cv_param(out, I, cv::HIGHEST_OBSERVED_MZ, format_args!("{hi_mz:.6}"))?;
 
     if let Some(event_id) = rec.acquisition_event_id {
         writeln!(
@@ -810,68 +1146,75 @@ fn write_spectrum<W: Write>(
     }
 
     writeln!(out, r#"        <scanList count="1">"#)?;
-    writeln!(
-        out,
-        r#"          <cvParam cvRef="MS" accession="MS:1000795" name="no combination" value=""/>"#
-    )?;
+    cv_param(out, "          ", cv::NO_COMBINATION, "")?;
     match ic_ref {
         Some(id) => writeln!(out, r#"          <scan instrumentConfigurationRef="{id}">"#)?,
         None => writeln!(out, r#"          <scan>"#)?,
     }
 
+    const S: &str = "            ";
     if let Some(f) = rec.filter.as_deref() {
         if !f.is_empty() {
-            writeln!(
-                out,
-                r#"            <cvParam cvRef="MS" accession="MS:1000512" name="filter string" value="{}"/>"#,
-                escape(f)
-            )?;
+            cv_param(out, S, cv::FILTER_STRING, escape(f))?;
         }
     }
 
     // mzML stores RT in minutes by convention.
     let rt_min = rec.retention_time_sec / 60.0;
-    writeln!(
+    cv_param_with_unit(
         out,
-        r#"            <cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="{:.6}" unitCvRef="UO" unitAccession="UO:0000031" unitName="minute"/>"#,
-        rt_min
+        S,
+        cv::SCAN_START_TIME,
+        format_args!("{rt_min:.6}"),
+        cv::MINUTE,
     )?;
 
     if let Some(it) = rec.ion_injection_time_ms {
-        writeln!(
+        cv_param_with_unit(
             out,
-            r#"            <cvParam cvRef="MS" accession="MS:1000927" name="ion injection time" value="{:.6}" unitCvRef="UO" unitAccession="UO:0000028" unitName="millisecond"/>"#,
-            it
+            S,
+            cv::ION_INJECTION_TIME,
+            format_args!("{it:.6}"),
+            cv::MILLISECOND,
         )?;
     }
 
     if let Some(mob) = rec.inv_mobility {
-        writeln!(
+        cv_param_with_unit(
             out,
-            r#"            <cvParam cvRef="MS" accession="MS:1002815" name="inverse reduced ion mobility" value="{:.6}" unitCvRef="MS" unitAccession="MS:1002814" unitName="volt-second per square centimeter"/>"#,
-            mob
+            S,
+            cv::INVERSE_REDUCED_ION_MOBILITY,
+            format_args!("{mob:.6}"),
+            cv::VOLT_SECOND_PER_SQUARE_CENTIMETER,
         )?;
     }
 
-    if let Some(cv) = rec.faims_cv {
-        writeln!(
+    if let Some(faims) = rec.faims_cv {
+        cv_param_with_unit(
             out,
-            r#"            <cvParam cvRef="MS" accession="MS:1001581" name="FAIMS compensation voltage" value="{:.4}" unitCvRef="UO" unitAccession="UO:0000218" unitName="volt"/>"#,
-            cv
+            S,
+            cv::FAIMS_COMPENSATION_VOLTAGE,
+            format_args!("{faims:.4}"),
+            cv::VOLT,
         )?;
     }
 
     writeln!(out, r#"            <scanWindowList count="1">"#)?;
     writeln!(out, r#"              <scanWindow>"#)?;
-    writeln!(
+    const W16: &str = "                ";
+    cv_param_with_unit(
         out,
-        r#"                <cvParam cvRef="MS" accession="MS:1000501" name="scan window lower limit" value="{:.6}" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>"#,
-        lo_mz
+        W16,
+        cv::SCAN_WINDOW_LOWER_LIMIT,
+        format_args!("{lo_mz:.6}"),
+        cv::MZ,
     )?;
-    writeln!(
+    cv_param_with_unit(
         out,
-        r#"                <cvParam cvRef="MS" accession="MS:1000500" name="scan window upper limit" value="{:.6}" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>"#,
-        hi_mz
+        W16,
+        cv::SCAN_WINDOW_UPPER_LIMIT,
+        format_args!("{hi_mz:.6}"),
+        cv::MZ,
     )?;
     writeln!(out, r#"              </scanWindow>"#)?;
     writeln!(out, r#"            </scanWindowList>"#)?;
@@ -890,26 +1233,33 @@ fn write_spectrum<W: Write>(
             writeln!(out, r#"          <precursor>"#)?;
         }
 
+        const P: &str = "              ";
         if pre.target_mz.is_some() || pre.isolation_width.is_some() {
             writeln!(out, r#"            <isolationWindow>"#)?;
             if let Some(mz) = pre.target_mz {
-                writeln!(
+                cv_param_with_unit(
                     out,
-                    r#"              <cvParam cvRef="MS" accession="MS:1000827" name="isolation window target m/z" value="{:.6}" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>"#,
-                    mz
+                    P,
+                    cv::ISOLATION_WINDOW_TARGET_MZ,
+                    format_args!("{mz:.6}"),
+                    cv::MZ,
                 )?;
             }
             if let Some(w) = pre.isolation_width {
                 let half = w / 2.0;
-                writeln!(
+                cv_param_with_unit(
                     out,
-                    r#"              <cvParam cvRef="MS" accession="MS:1000828" name="isolation window lower offset" value="{:.6}" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>"#,
-                    half
+                    P,
+                    cv::ISOLATION_WINDOW_LOWER_OFFSET,
+                    format_args!("{half:.6}"),
+                    cv::MZ,
                 )?;
-                writeln!(
+                cv_param_with_unit(
                     out,
-                    r#"              <cvParam cvRef="MS" accession="MS:1000829" name="isolation window upper offset" value="{:.6}" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>"#,
-                    half
+                    P,
+                    cv::ISOLATION_WINDOW_UPPER_OFFSET,
+                    format_args!("{half:.6}"),
+                    cv::MZ,
                 )?;
             }
             writeln!(out, r#"            </isolationWindow>"#)?;
@@ -918,29 +1268,26 @@ fn write_spectrum<W: Write>(
         if let Some(mz) = pre.selected_mz {
             writeln!(out, r#"            <selectedIonList count="1">"#)?;
             writeln!(out, r#"              <selectedIon>"#)?;
-            writeln!(
+            cv_param_with_unit(
                 out,
-                r#"                <cvParam cvRef="MS" accession="MS:1000744" name="selected ion m/z" value="{:.6}" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>"#,
-                mz
+                W16,
+                cv::SELECTED_ION_MZ,
+                format_args!("{mz:.6}"),
+                cv::MZ,
             )?;
             if let Some(z) = pre.charge {
-                writeln!(
-                    out,
-                    r#"                <cvParam cvRef="MS" accession="MS:1000041" name="charge state" value="{z}"/>"#
-                )?;
+                cv_param(out, W16, cv::CHARGE_STATE, z)?;
             }
             if let Some(i) = pre.intensity {
-                writeln!(
-                    out,
-                    r#"                <cvParam cvRef="MS" accession="MS:1000042" name="peak intensity" value="{:.6}"/>"#,
-                    i
-                )?;
+                cv_param(out, W16, cv::PEAK_INTENSITY, format_args!("{i:.6}"))?;
             }
             if let Some(ccs) = pre.ccs {
-                writeln!(
+                cv_param_with_unit(
                     out,
-                    r#"                <cvParam cvRef="MS" accession="MS:1002954" name="collisional cross sectional area" value="{:.6}" unitCvRef="UO" unitAccession="UO:0000324" unitName="square angstrom"/>"#,
-                    ccs
+                    W16,
+                    cv::COLLISIONAL_CROSS_SECTIONAL_AREA,
+                    format_args!("{ccs:.6}"),
+                    cv::SQUARE_ANGSTROM,
                 )?;
             }
             writeln!(out, r#"              </selectedIon>"#)?;
@@ -951,25 +1298,26 @@ fn write_spectrum<W: Write>(
         // Unknown activation: emit no dissociation method rather than
         // asserting CID, which would be wrong for ETD/UVPD/... sources.
         if let Some(act) = pre.activation {
-            for (acc, name) in activation_cv(act, pre.analyzer) {
-                writeln!(
-                    out,
-                    r#"              <cvParam cvRef="MS" accession="{acc}" name="{name}" value=""/>"#
-                )?;
+            for term in activation_terms(act, pre.analyzer) {
+                cv_param(out, P, *term, "")?;
             }
         }
         if let Some(e) = pre.collision_energy {
             if pre.ce_is_nce {
-                writeln!(
+                cv_param_with_unit(
                     out,
-                    r#"              <cvParam cvRef="MS" accession="MS:1000138" name="normalized collision energy" value="{:.2}" unitCvRef="UO" unitAccession="UO:0000187" unitName="percent"/>"#,
-                    e
+                    P,
+                    cv::NORMALIZED_COLLISION_ENERGY,
+                    format_args!("{e:.2}"),
+                    cv::PERCENT,
                 )?;
             } else {
-                writeln!(
+                cv_param_with_unit(
                     out,
-                    r#"              <cvParam cvRef="MS" accession="MS:1000045" name="collision energy" value="{:.2}" unitCvRef="UO" unitAccession="UO:0000266" unitName="electronvolt"/>"#,
-                    e
+                    P,
+                    cv::COLLISION_ENERGY,
+                    format_args!("{e:.2}"),
+                    cv::ELECTRONVOLT,
                 )?;
             }
         }
@@ -979,7 +1327,7 @@ fn write_spectrum<W: Write>(
     }
 
     if n_peaks > 0 {
-        let (compression_acc, compression_name) = compression_cv(compression);
+        let compression_cv = compression_term(compression);
         let mz_b64 = encode_f64_array(&rec.mz, compression);
         let int_b64 = encode_f32_array(&rec.intensity, compression);
         let mobility_b64_opt = rec
@@ -993,83 +1341,41 @@ fn write_spectrum<W: Write>(
             out,
             r#"        <binaryDataArrayList count="{array_count}">"#
         )?;
-
-        writeln!(
+        write_binary_array(
             out,
-            r#"          <binaryDataArray encodedLength="{}">"#,
-            mz_b64.len()
+            &mz_b64,
+            cv::MZ_ARRAY,
+            None,
+            cv::FLOAT_64_BIT,
+            compression_cv,
         )?;
-        writeln!(
+        write_binary_array(
             out,
-            r#"            <cvParam cvRef="MS" accession="MS:1000514" name="m/z array" value=""/>"#
+            &int_b64,
+            cv::INTENSITY_ARRAY,
+            None,
+            cv::FLOAT_32_BIT,
+            compression_cv,
         )?;
-        writeln!(
-            out,
-            r#"            <cvParam cvRef="MS" accession="MS:1000523" name="64-bit float" value=""/>"#
-        )?;
-        writeln!(
-            out,
-            r#"            <cvParam cvRef="MS" accession="{compression_acc}" name="{compression_name}" value=""/>"#
-        )?;
-        writeln!(out, r#"            <binary>{mz_b64}</binary>"#)?;
-        writeln!(out, r#"          </binaryDataArray>"#)?;
-
-        writeln!(
-            out,
-            r#"          <binaryDataArray encodedLength="{}">"#,
-            int_b64.len()
-        )?;
-        writeln!(
-            out,
-            r#"            <cvParam cvRef="MS" accession="MS:1000515" name="intensity array" value=""/>"#
-        )?;
-        writeln!(
-            out,
-            r#"            <cvParam cvRef="MS" accession="MS:1000521" name="32-bit float" value=""/>"#
-        )?;
-        writeln!(
-            out,
-            r#"            <cvParam cvRef="MS" accession="{compression_acc}" name="{compression_name}" value=""/>"#
-        )?;
-        writeln!(out, r#"            <binary>{int_b64}</binary>"#)?;
-        writeln!(out, r#"          </binaryDataArray>"#)?;
-
         if let Some(mobility_b64) = mobility_b64_opt {
-            // (array term, unit cvRef, unit term); each term is an
-            // (accession, name) pair so tests/cv_terms.rs can check it.
-            let ((cv_acc, cv_name), unit_ref, (unit_acc, unit_name)) = match mobility_kind {
-                Some(MobilityArrayKind::DriftTimeMilliseconds) => (
-                    ("MS:1003007", "raw ion mobility array"),
-                    "UO",
-                    ("UO:0000028", "millisecond"),
-                ),
+            let (array, unit) = match mobility_kind {
+                Some(MobilityArrayKind::DriftTimeMilliseconds) => {
+                    (cv::RAW_ION_MOBILITY_ARRAY, cv::MILLISECOND)
+                }
                 Some(MobilityArrayKind::InverseReducedVsPerCm2) | None => (
-                    ("MS:1003008", "raw inverse reduced ion mobility array"),
-                    "MS",
-                    ("MS:1002814", "volt-second per square centimeter"),
+                    cv::RAW_INVERSE_REDUCED_ION_MOBILITY_ARRAY,
+                    cv::VOLT_SECOND_PER_SQUARE_CENTIMETER,
                 ),
             };
-            writeln!(
+            write_binary_array(
                 out,
-                r#"          <binaryDataArray encodedLength="{}">"#,
-                mobility_b64.len()
+                &mobility_b64,
+                array,
+                Some(unit),
+                cv::FLOAT_32_BIT,
+                compression_cv,
             )?;
-            writeln!(
-                out,
-                r#"            <cvParam cvRef="MS" accession="{cv_acc}" name="{cv_name}" value="" unitCvRef="{unit_ref}" unitAccession="{unit_acc}" unitName="{unit_name}"/>"#
-            )?;
-            writeln!(
-                out,
-                r#"            <cvParam cvRef="MS" accession="MS:1000521" name="32-bit float" value=""/>"#
-            )?;
-            writeln!(
-                out,
-                r#"            <cvParam cvRef="MS" accession="{compression_acc}" name="{compression_name}" value=""/>"#
-            )?;
-            writeln!(out, r#"            <binary>{mobility_b64}</binary>"#)?;
-            writeln!(out, r#"          </binaryDataArray>"#)?;
         }
-
         writeln!(out, r#"        </binaryDataArrayList>"#)?;
     }
 
@@ -1077,35 +1383,63 @@ fn write_spectrum<W: Write>(
     Ok(())
 }
 
+/// One `<binaryDataArray>`: the array-type term (with `unit` when given),
+/// the precision term, the compression term, and the base64 payload.
+fn write_binary_array<W: Write>(
+    out: &mut W,
+    b64: &str,
+    array: Term,
+    unit: Option<Term>,
+    precision: Term,
+    compression: Term,
+) -> io::Result<()> {
+    const B: &str = "            ";
+    writeln!(
+        out,
+        r#"          <binaryDataArray encodedLength="{}">"#,
+        b64.len()
+    )?;
+    match unit {
+        Some(unit) => cv_param_with_unit(out, B, array, "", unit)?,
+        None => cv_param(out, B, array, "")?,
+    }
+    cv_param(out, B, precision, "")?;
+    cv_param(out, B, compression, "")?;
+    writeln!(out, r#"            <binary>{b64}</binary>"#)?;
+    writeln!(out, r#"          </binaryDataArray>"#)?;
+    Ok(())
+}
+
+/// Write one `<chromatogram>`. `index` is its position in the written list.
 fn write_chromatogram<W: Write>(
     out: &mut W,
     rec: &ChromatogramRecord,
+    index: usize,
     compression: Compression,
-) -> Result<()> {
+) -> io::Result<()> {
     let n = rec.time_sec.len();
 
     writeln!(
         out,
         r#"<chromatogram id="{id}" index="{idx}" defaultArrayLength="{n}">"#,
         id = escape(&rec.id),
-        idx = rec.index,
+        idx = index,
     )?;
 
     match &rec.chromatogram_type {
-        Some(cv) => write_cv(out, "        ", cv)?,
-        None => writeln!(
-            out,
-            r#"        <cvParam cvRef="MS" accession="MS:1000235" name="total ion current chromatogram" value=""/>"#
-        )?,
+        Some(term) => cv_term_param(out, "        ", term)?,
+        None => cv_param(out, "        ", cv::TOTAL_ION_CURRENT_CHROMATOGRAM, "")?,
     }
 
     if let Some(mz) = rec.precursor_mz {
         writeln!(out, r#"        <precursor>"#)?;
         writeln!(out, r#"          <isolationWindow>"#)?;
-        writeln!(
+        cv_param_with_unit(
             out,
-            r#"            <cvParam cvRef="MS" accession="MS:1000827" name="isolation window target m/z" value="{:.6}" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>"#,
-            mz
+            "            ",
+            cv::ISOLATION_WINDOW_TARGET_MZ,
+            format_args!("{mz:.6}"),
+            cv::MZ,
         )?;
         writeln!(out, r#"          </isolationWindow>"#)?;
         // `<activation>` is required inside `<precursor>`, but
@@ -1119,10 +1453,12 @@ fn write_chromatogram<W: Write>(
     if let Some(mz) = rec.product_mz {
         writeln!(out, r#"        <product>"#)?;
         writeln!(out, r#"          <isolationWindow>"#)?;
-        writeln!(
+        cv_param_with_unit(
             out,
-            r#"            <cvParam cvRef="MS" accession="MS:1000827" name="isolation window target m/z" value="{:.6}" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>"#,
-            mz
+            "            ",
+            cv::ISOLATION_WINDOW_TARGET_MZ,
+            format_args!("{mz:.6}"),
+            cv::MZ,
         )?;
         writeln!(out, r#"          </isolationWindow>"#)?;
         writeln!(out, r#"        </product>"#)?;
@@ -1133,52 +1469,27 @@ fn write_chromatogram<W: Write>(
     // mzML stores time arrays in minutes by convention, matching scan start
     // time; `time_sec` is stored in seconds per `ChromatogramRecord`'s docs.
     let time_min: Vec<f32> = rec.time_sec.iter().map(|&t| t / 60.0).collect();
-    let (compression_acc, compression_name) = compression_cv(compression);
+    let compression_cv = compression_term(compression);
     let time_b64 = encode_f32_array(&time_min, compression);
     let int_b64 = encode_f32_array(&rec.intensity, compression);
 
     writeln!(out, r#"        <binaryDataArrayList count="2">"#)?;
-
-    writeln!(
+    write_binary_array(
         out,
-        r#"          <binaryDataArray encodedLength="{}">"#,
-        time_b64.len()
+        &time_b64,
+        cv::TIME_ARRAY,
+        Some(cv::MINUTE),
+        cv::FLOAT_32_BIT,
+        compression_cv,
     )?;
-    writeln!(
+    write_binary_array(
         out,
-        r#"            <cvParam cvRef="MS" accession="MS:1000595" name="time array" value="" unitCvRef="UO" unitAccession="UO:0000031" unitName="minute"/>"#
+        &int_b64,
+        cv::INTENSITY_ARRAY,
+        None,
+        cv::FLOAT_32_BIT,
+        compression_cv,
     )?;
-    writeln!(
-        out,
-        r#"            <cvParam cvRef="MS" accession="MS:1000521" name="32-bit float" value=""/>"#
-    )?;
-    writeln!(
-        out,
-        r#"            <cvParam cvRef="MS" accession="{compression_acc}" name="{compression_name}" value=""/>"#
-    )?;
-    writeln!(out, r#"            <binary>{time_b64}</binary>"#)?;
-    writeln!(out, r#"          </binaryDataArray>"#)?;
-
-    writeln!(
-        out,
-        r#"          <binaryDataArray encodedLength="{}">"#,
-        int_b64.len()
-    )?;
-    writeln!(
-        out,
-        r#"            <cvParam cvRef="MS" accession="MS:1000515" name="intensity array" value=""/>"#
-    )?;
-    writeln!(
-        out,
-        r#"            <cvParam cvRef="MS" accession="MS:1000521" name="32-bit float" value=""/>"#
-    )?;
-    writeln!(
-        out,
-        r#"            <cvParam cvRef="MS" accession="{compression_acc}" name="{compression_name}" value=""/>"#
-    )?;
-    writeln!(out, r#"            <binary>{int_b64}</binary>"#)?;
-    writeln!(out, r#"          </binaryDataArray>"#)?;
-
     writeln!(out, r#"        </binaryDataArrayList>"#)?;
     writeln!(out, r#"      </chromatogram>"#)?;
     Ok(())
@@ -1209,7 +1520,25 @@ mod tests {
         extra: std::collections::BTreeMap<String, String>,
         spectra: Vec<SpectrumRecord>,
         chroms: Vec<ChromatogramRecord>,
-        extra_processing: Vec<(&'static str, &'static str)>,
+        extra_processing: Vec<CvTerm>,
+        /// Positions in `spectra` that are yielded as `Err` instead.
+        failing_spectra: Vec<usize>,
+        /// Positions in `chroms` that are yielded as `Err` instead.
+        failing_chroms: Vec<usize>,
+        count_hint: CountHint,
+    }
+
+    /// What [`ToySource`] returns from `spectrum_count_hint`.
+    #[derive(Clone, Copy)]
+    enum CountHint {
+        /// `Some(spectra.len())`, failing positions included.
+        Len,
+        None,
+        Fixed(usize),
+    }
+
+    fn decode_error(what: &str, i: usize) -> crate::Error {
+        crate::Error::vendor(std::io::Error::other(format!("{what} {i} is corrupt")))
     }
 
     impl ToySource {
@@ -1225,6 +1554,9 @@ mod tests {
                 spectra: vec![minimal_spectrum(0, None)],
                 chroms: Vec::new(),
                 extra_processing: Vec::new(),
+                failing_spectra: Vec::new(),
+                failing_chroms: Vec::new(),
+                count_hint: CountHint::Len,
             }
         }
     }
@@ -1248,21 +1580,37 @@ mod tests {
             }
         }
 
-        fn iter_spectra<'a>(&'a mut self) -> Box<dyn Iterator<Item = SpectrumRecord> + 'a> {
-            Box::new(self.spectra.clone().into_iter())
+        fn iter_spectra<'a>(&'a mut self) -> crate::SpectrumIter<'a> {
+            let failing = &self.failing_spectra;
+            Box::new(self.spectra.iter().enumerate().map(move |(i, rec)| {
+                if failing.contains(&i) {
+                    Err(decode_error("spectrum", i))
+                } else {
+                    Ok(rec.clone())
+                }
+            }))
         }
 
-        fn iter_chromatograms<'a>(
-            &'a mut self,
-        ) -> Box<dyn Iterator<Item = ChromatogramRecord> + 'a> {
-            Box::new(self.chroms.clone().into_iter())
+        fn iter_chromatograms<'a>(&'a mut self) -> crate::ChromatogramIter<'a> {
+            let failing = &self.failing_chroms;
+            Box::new(self.chroms.iter().enumerate().map(move |(i, rec)| {
+                if failing.contains(&i) {
+                    Err(decode_error("chromatogram", i))
+                } else {
+                    Ok(rec.clone())
+                }
+            }))
         }
 
         fn spectrum_count_hint(&self) -> Option<usize> {
-            Some(self.spectra.len())
+            match self.count_hint {
+                CountHint::Len => Some(self.spectra.len()),
+                CountHint::None => None,
+                CountHint::Fixed(n) => Some(n),
+            }
         }
 
-        fn additional_processing_steps(&self) -> Vec<(&'static str, &'static str)> {
+        fn additional_processing_steps(&self) -> Vec<CvTerm> {
             self.extra_processing.clone()
         }
     }
@@ -1410,6 +1758,71 @@ mod tests {
             && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
     }
 
+    fn run_id(meta: &RunMetadata) -> String {
+        DocumentIds::new(meta).run
+    }
+
+    fn software_id(name: &str) -> String {
+        let meta = RunMetadata {
+            software_name: name.into(),
+            ..ToySource::new().run_metadata()
+        };
+        DocumentIds::new(&meta).software
+    }
+
+    #[test]
+    fn software_id_is_a_valid_ncname() {
+        assert_eq!(software_id("opentfraw"), "opentfraw");
+        assert_eq!(software_id("open tf raw"), "open_tf_raw");
+        assert_eq!(software_id("2raw"), "software_2raw");
+        assert_eq!(software_id(""), "software_");
+        assert_eq!(software_id("sf1"), "software_sf1");
+        assert_eq!(software_id("IC1"), "software_IC1");
+        assert_eq!(
+            software_id("acquisition_software"),
+            "software_acquisition_software"
+        );
+        for name in ["0", "a b", "r\u{e9}ader", "a:b", "x&y", ""] {
+            let id = software_id(name);
+            assert!(is_ncname(&id), "{name:?} -> {id:?}");
+        }
+    }
+
+    #[test]
+    fn software_id_and_refs_use_sanitized_name_and_value_keeps_original() {
+        struct Named(ToySource);
+        impl SpectrumSource for Named {
+            fn run_metadata(&self) -> RunMetadata {
+                RunMetadata {
+                    software_name: "1 reader & co".into(),
+                    ..self.0.run_metadata()
+                }
+            }
+            fn iter_spectra<'a>(&'a mut self) -> crate::SpectrumIter<'a> {
+                self.0.iter_spectra()
+            }
+        }
+        let mut src = Named(ToySource::new());
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(r#"<software id="software_1_reader___co" version="0.0.0">"#));
+        assert!(s.contains(r#"softwareRef="software_1_reader___co""#));
+        assert!(s.contains(r#"name="custom unreleased software tool" value="1 reader &amp; co""#));
+    }
+
+    #[test]
+    fn run_id_does_not_collide_with_software_id() {
+        let meta = RunMetadata {
+            source_file_name: "reader".into(),
+            software_name: "reader".into(),
+            ..ToySource::new().run_metadata()
+        };
+        let ids = DocumentIds::new(&meta);
+        assert_eq!(ids.software, "reader");
+        assert_eq!(ids.run, "run_reader");
+    }
+
     #[test]
     fn run_id_is_a_valid_ncname() {
         let meta = |name: &str| RunMetadata {
@@ -1470,7 +1883,10 @@ mod tests {
     #[test]
     fn additional_processing_steps_appended_in_order_after_conversion_step() {
         let mut src = ToySource::new();
-        src.extra_processing = vec![("MS:1000035", "peak picking"), ("MS:1000592", "smoothing")];
+        src.extra_processing = vec![
+            cv::PEAK_PICKING.into(),
+            CvTerm::new("MS:1000592", "smoothing"),
+        ];
         let mut buf = Vec::new();
         write_mzml(&mut src, &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
@@ -1753,18 +2169,320 @@ mod tests {
         assert!(s[offset..].starts_with("<indexList "));
     }
 
-    // ---------- compression (issue #8) --------------------------------
+    // ---------- record errors ------------------------------------------
 
     #[test]
-    fn compression_cv_selects_matching_accession() {
+    fn record_error_fails_the_write_by_default() {
+        let mut src = ToySource::new();
+        src.spectra.push(minimal_spectrum(1, None));
+        src.failing_spectra = vec![1];
+        let mut buf = Vec::new();
+        let err = write_mzml(&mut src, &mut buf).unwrap_err();
+        assert!(matches!(err, crate::Error::Vendor(_)), "{err:?}");
+        assert!(err.to_string().contains("spectrum 1 is corrupt"));
+
+        let mut buf = Vec::new();
+        let err = write_indexed_mzml(&mut src, &mut buf).unwrap_err();
+        assert!(err.to_string().contains("spectrum 1 is corrupt"));
+        // The document stops at the failing record: no trailer.
+        assert!(!String::from_utf8(buf).unwrap().contains("<indexList"));
+    }
+
+    #[test]
+    fn chromatogram_error_fails_the_write_by_default() {
+        let mut src = ToySource::new();
+        src.chroms = vec![tic_chromatogram(0)];
+        src.failing_chroms = vec![0];
+        let err = write_mzml(&mut src, &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("chromatogram 0 is corrupt"));
+    }
+
+    #[test]
+    fn skip_policy_counts_and_reports_skipped_records() {
+        let mut src = ToySource::new();
+        src.spectra = (0..4).map(|i| minimal_spectrum(i, None)).collect();
+        src.failing_spectra = vec![1, 3];
+        src.chroms = vec![tic_chromatogram(0), srm_chromatogram(1)];
+        src.failing_chroms = vec![0];
+        let opts = WriteOptions::new().with_record_error_policy(RecordErrorPolicy::Skip);
+
+        for indexed in [false, true] {
+            let mut buf = Vec::new();
+            let summary = if indexed {
+                write_indexed_mzml_with_options(&mut src, &mut buf, &opts).unwrap()
+            } else {
+                write_mzml_with_options(&mut src, &mut buf, &opts).unwrap()
+            };
+            assert_eq!(summary.spectra_written, 2);
+            assert_eq!(summary.spectra_skipped, 2);
+            assert_eq!(summary.chromatograms_written, 1);
+            assert_eq!(summary.chromatograms_skipped, 1);
+            assert_eq!(summary.skipped(), 3);
+
+            let s = String::from_utf8(buf).unwrap();
+            assert_eq!(s.matches("<spectrum ").count(), 2);
+            assert!(s.contains(r#"<chromatogramList count="1""#));
+            assert!(!s.contains(r#"id="TIC""#));
+            if indexed {
+                assert_eq!(s.matches("<offset ").count(), 3);
+            }
+        }
+    }
+
+    /// The value of `attr="..."` in `tag`.
+    fn attr<'a>(tag: &'a str, attr: &str) -> &'a str {
+        let key = format!(" {attr}=\"");
+        let start = tag.find(&key).unwrap() + key.len();
+        let len = tag[start..].find('"').unwrap();
+        &tag[start..start + len]
+    }
+
+    /// Check that `<{list} count>` equals the number of `<{elem}>` elements,
+    /// that their `index` attributes are 0, 1, 2, ... in document order, and
+    /// return their ids in order.
+    fn check_list(s: &str, list: &str, elem: &str) -> Vec<String> {
+        let open = format!("<{elem} ");
+        let tags: Vec<&str> = s
+            .match_indices(&open)
+            .map(|(i, _)| &s[i..i + s[i..].find('>').unwrap()])
+            .collect();
+        for (i, tag) in tags.iter().enumerate() {
+            assert_eq!(attr(tag, "index"), i.to_string(), "{tag}");
+        }
+        match s.find(&format!("<{list} ")) {
+            Some(i) => {
+                let list_tag = &s[i..i + s[i..].find('>').unwrap()];
+                assert_eq!(attr(list_tag, "count"), tags.len().to_string());
+            }
+            None => assert!(tags.is_empty()),
+        }
+        tags.iter().map(|t| attr(t, "id").to_string()).collect()
+    }
+
+    /// Check list counts, consecutive indexes, and, for indexed mzML, that
+    /// every `<offset>` and `<indexListOffset>` points at its element and
+    /// the `<fileChecksum>` matches. Returns the spectrum count.
+    fn check_document(buf: &[u8], indexed: bool) -> usize {
+        let s = std::str::from_utf8(buf).unwrap();
+        let spectra = check_list(s, "spectrumList", "spectrum");
+        let chroms = check_list(s, "chromatogramList", "chromatogram");
+        if !indexed {
+            assert!(!s.contains("<indexList"));
+            return spectra.len();
+        }
+        let mut offsets = Vec::new();
+        for line in s.lines() {
+            let Some(rest) = line.trim().strip_prefix("<offset idRef=\"") else {
+                continue;
+            };
+            let (id, rest) = rest.split_once('"').unwrap();
+            let offset: usize = rest
+                .trim_start_matches('>')
+                .trim_end_matches("</offset>")
+                .parse()
+                .unwrap();
+            offsets.push((id.to_string(), offset));
+        }
+        assert_eq!(offsets.len(), spectra.len() + chroms.len());
+        for ((id, offset), (elem, expected)) in offsets.iter().zip(
+            spectra
+                .iter()
+                .map(|id| ("spectrum", id))
+                .chain(chroms.iter().map(|id| ("chromatogram", id))),
+        ) {
+            assert_eq!(id, expected);
+            assert!(
+                s[*offset..].starts_with(&format!("<{elem} id=\"{id}\"")),
+                "offset {offset} for {id:?} points at {:?}",
+                &s[*offset..(*offset + 30).min(s.len())]
+            );
+        }
+        let start = s.find("<indexListOffset>").unwrap() + "<indexListOffset>".len();
+        let end = s.find("</indexListOffset>").unwrap();
+        let offset: usize = s[start..end].parse().unwrap();
+        assert!(s[offset..].starts_with("<indexList "));
+
+        let tag = "<fileChecksum>";
+        let digest_start = s.find(tag).unwrap() + tag.len();
+        let digest_end = s.find("</fileChecksum>").unwrap();
+        assert_eq!(&s[digest_start..digest_end], sha1_hex(&buf[..digest_start]));
+        spectra.len()
+    }
+
+    fn write_with(src: &mut ToySource, opts: &WriteOptions, indexed: bool) -> Vec<u8> {
+        let mut buf = Vec::new();
+        if indexed {
+            write_indexed_mzml_with_options(src, &mut buf, opts).unwrap();
+        } else {
+            write_mzml_with_options(src, &mut buf, opts).unwrap();
+        }
+        buf
+    }
+
+    #[test]
+    fn skip_policy_writes_real_counts_and_consecutive_indexes() {
+        let mut src = ToySource::new();
+        src.spectra = (0..6)
+            .map(|i| {
+                let mut r = minimal_spectrum(i, None);
+                r.native_id = format!("controllerType=0 controllerNumber=1 scan={}", i + 1);
+                r
+            })
+            .collect();
+        src.failing_spectra = vec![0, 2, 3];
+        src.chroms = vec![tic_chromatogram(0), srm_chromatogram(1)];
+        src.failing_chroms = vec![0];
+        let opts = WriteOptions::new().with_record_error_policy(RecordErrorPolicy::Skip);
+
+        for indexed in [false, true] {
+            let buf = write_with(&mut src, &opts, indexed);
+            assert_eq!(check_document(&buf, indexed), 3);
+            let s = String::from_utf8(buf).unwrap();
+            assert!(s.contains(r#"<spectrumList count="3" "#));
+            // Source native ids are kept in `id`; `index` is renumbered.
+            assert!(s.contains(
+                r#"<spectrum id="controllerType=0 controllerNumber=1 scan=2" index="0" "#
+            ));
+            assert!(s.contains(
+                r#"<spectrum id="controllerType=0 controllerNumber=1 scan=6" index="2" "#
+            ));
+            assert!(s.contains(r#"<chromatogramList count="1" "#));
+            assert!(s.contains(r#"<chromatogram id="SRM SIC Q1=524.3 Q3=136.1" index="0" "#));
+        }
+    }
+
+    #[test]
+    fn spectrum_count_ignores_missing_or_wrong_hint() {
+        for hint in [CountHint::None, CountHint::Fixed(1), CountHint::Fixed(99)] {
+            let mut src = ToySource::new();
+            src.spectra = (0..3)
+                .map(|i| {
+                    let mut r = minimal_spectrum(i, None);
+                    r.native_id = format!("scan={}", i + 1);
+                    r
+                })
+                .collect();
+            src.count_hint = hint;
+            for indexed in [false, true] {
+                let buf = write_with(&mut src, &WriteOptions::new(), indexed);
+                assert_eq!(check_document(&buf, indexed), 3);
+            }
+        }
+    }
+
+    #[test]
+    fn empty_source_writes_zero_count() {
+        let mut src = ToySource::new();
+        src.spectra.clear();
+        src.count_hint = CountHint::Fixed(5);
+        for indexed in [false, true] {
+            let buf = write_with(&mut src, &WriteOptions::new(), indexed);
+            assert_eq!(check_document(&buf, indexed), 0);
+            let s = String::from_utf8(buf).unwrap();
+            assert!(s.contains(r#"<spectrumList count="0" "#));
+        }
+    }
+
+    /// A fresh, empty spool directory under the system temp dir.
+    fn spool_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "openmassspec-spool-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn spilled_spool_matches_in_memory_output_and_is_removed() {
+        let dir = spool_test_dir("spill");
+        let mut src = ToySource::new();
+        src.spectra = (0..5)
+            .map(|i| {
+                let mut r = minimal_spectrum(i, None);
+                r.native_id = format!("scan={}", i + 1);
+                r
+            })
+            .collect();
+        src.failing_spectra = vec![1];
+        src.chroms = vec![tic_chromatogram(0)];
+        let opts = WriteOptions::new()
+            .with_record_error_policy(RecordErrorPolicy::Skip)
+            .with_spool_dir(&dir);
+
+        for indexed in [false, true] {
+            let in_memory = write_with(&mut src, &opts, indexed);
+            let mut spilled = Vec::new();
+            // A 1-byte limit spills on the first write.
+            let summary = if indexed {
+                write_indexed(&mut src, &mut spilled, &opts, 1).unwrap()
+            } else {
+                write_plain(&mut src, &mut spilled, &opts, 1).unwrap()
+            };
+            assert_eq!(summary.spectra_written, 4);
+            assert_eq!(spilled, in_memory);
+            assert_eq!(check_document(&spilled, indexed), 4);
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "spool file left");
+        }
+
+        // The spool file is also removed when the write fails.
+        let fail = WriteOptions::new().with_spool_dir(&dir);
+        assert!(write_plain(&mut src, &mut Vec::new(), &fail, 1).is_err());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "spool file left");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unusable_spool_dir_is_an_io_error() {
+        let dir = spool_test_dir("missing").join("does-not-exist");
+        let mut src = ToySource::new();
+        let opts = WriteOptions::new().with_spool_dir(&dir);
+        let err = write_plain(&mut src, &mut Vec::new(), &opts, 1).unwrap_err();
+        assert!(matches!(err, crate::Error::Io(_)), "{err:?}");
+        assert!(err.to_string().contains("spool file"), "{err}");
+        fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn summary_counts_everything_when_nothing_fails() {
+        let mut src = ToySource::new();
+        src.chroms = vec![tic_chromatogram(0)];
+        let summary = write_indexed_mzml(&mut src, &mut Vec::new()).unwrap();
+        assert_eq!(summary.spectra_written, 1);
+        assert_eq!(summary.chromatograms_written, 1);
+        assert_eq!(summary.skipped(), 0);
+    }
+
+    #[test]
+    fn generated_term_names_need_no_xml_escaping() {
+        for t in cv::ALL {
+            assert_eq!(escape(t.name()), t.name(), "{}", t.accession());
+        }
+    }
+
+    #[test]
+    fn cv_list_names_the_generated_obo_release() {
+        let mut src = ToySource::new();
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(&format!(
+            r#"version="{}" URI="{}""#,
+            cv::PSI_MS_VERSION,
+            cv::PSI_MS_SOURCE_URL
+        )));
+    }
+
+    // ---------- compression ---------------------------------------------
+
+    #[test]
+    fn compression_term_selects_matching_accession() {
         assert_eq!(
-            compression_cv(Compression::NoCompression),
-            ("MS:1000576", "no compression")
+            compression_term(Compression::NoCompression),
+            cv::NO_COMPRESSION
         );
-        assert_eq!(
-            compression_cv(Compression::Zlib),
-            ("MS:1000574", "zlib compression")
-        );
+        assert_eq!(compression_term(Compression::Zlib), cv::ZLIB_COMPRESSION);
     }
 
     #[test]
@@ -1804,16 +2522,17 @@ mod tests {
     }
 
     #[test]
-    fn explicit_no_compression_matches_pre_1_4_layout() {
+    fn explicit_no_compression_writes_raw_little_endian_arrays() {
         let mut src = ToySource::new();
         let mut buf = Vec::new();
-        write_mzml_with_compression(&mut src, &mut buf, Compression::NoCompression).unwrap();
+        let opts = WriteOptions::new().with_compression(Compression::NoCompression);
+        write_mzml_with_options(&mut src, &mut buf, &opts).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains(r#"accession="MS:1000576" name="no compression""#));
         assert!(!s.contains("MS:1000574"));
         // The single toy spectrum has mz = [100.0]; with no compression the
-        // <binary> payload is exactly the un-compressed base64 of its 8
-        // little-endian bytes, matching the writer's pre-1.4 output.
+        // <binary> payload is exactly the base64 of its 8 little-endian
+        // bytes.
         let expected = base64_encode(&100.0f64.to_le_bytes());
         assert!(s.contains(&format!("<binary>{expected}</binary>")));
     }
@@ -1947,14 +2666,11 @@ mod tests {
         assert!(spectrum_extra < scan_list);
     }
 
-    // ---------- Sha1 test vectors (issue #11) -------------------------------
+    // ---------- Sha1 test vectors -------------------------------------------
     //
-    // The hand-rolled SHA-1 above had no regression protection: nothing in
-    // the crate would catch a future refactor silently breaking it. These
-    // vectors are checked against a well-established independent
-    // implementation (Python's `hashlib`), not against this module's own
-    // output, so they actually catch a broken implementation rather than
-    // just re-confirming it.
+    // These vectors come from an independent implementation (Python's
+    // `hashlib`), not from this module's own output, so they catch a broken
+    // implementation rather than re-confirming it.
 
     fn sha1_hex(data: &[u8]) -> String {
         let mut h = Sha1::new();

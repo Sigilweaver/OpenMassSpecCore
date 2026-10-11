@@ -6,73 +6,98 @@
 //! implements [`crate::SpectrumSource`] which yields these records; a
 //! consumer takes any `SpectrumSource` without caring which vendor produced
 //! it.
+//!
+//! Every record struct is `#[non_exhaustive]`, so fields can be added in a
+//! minor release. Code outside this crate builds records with the
+//! constructors and `with_*` setters (or assigns the public fields of a
+//! constructed value); struct literals and `..Default::default()` only work
+//! inside this crate.
 
-use crate::enums::{Activation, Analyzer, MobilityArrayKind, Polarity, ScanMode};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+
+use crate::cv;
+use crate::enums::{Activation, Analyzer, MobilityArrayKind, Polarity, ScanMode};
+
+/// Generates builder setters: `KIND SETTER FIELD: TYPE`.
+///
+/// * `val` takes the field type as is.
+/// * `into` takes `impl Into<TYPE>`.
+/// * `opt` sets an `Option<TYPE>` field and takes `impl Into<Option<TYPE>>`,
+///   so both `T` and `Option<T>` are accepted.
+macro_rules! setters {
+    ($ty:ty { $( $kind:ident $setter:ident $field:ident : $t:ty ),* $(,)? }) => {
+        impl $ty {
+            $( setters!(@one $kind $setter $field : $t); )*
+        }
+    };
+    (@one val $setter:ident $field:ident : $t:ty) => {
+        #[doc = concat!("Set `", stringify!($field), "`.")]
+        #[must_use]
+        pub fn $setter(mut self, value: $t) -> Self {
+            self.$field = value;
+            self
+        }
+    };
+    (@one into $setter:ident $field:ident : $t:ty) => {
+        #[doc = concat!("Set `", stringify!($field), "`.")]
+        #[must_use]
+        pub fn $setter(mut self, value: impl Into<$t>) -> Self {
+            self.$field = value.into();
+            self
+        }
+    };
+    (@one opt $setter:ident $field:ident : $t:ty) => {
+        #[doc = concat!(
+            "Set `", stringify!($field), "`. Accepts a value or an `Option`."
+        )]
+        #[must_use]
+        pub fn $setter(mut self, value: impl Into<Option<$t>>) -> Self {
+            self.$field = value.into();
+            self
+        }
+    };
+}
 
 /// A PSI-MS controlled-vocabulary term.
 ///
 /// `accession` is a stable identifier (`MS:NNNNNNN` or `UO:NNNNNNN`); `name`
-/// is the human-readable term. mzML output writes these verbatim.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+/// is the human-readable term. mzML output writes these verbatim. Both are
+/// `Cow<'static, str>`: terms built from literals or from the generated
+/// [`crate::cv`] constants borrow, deserialized terms own their strings.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct CvTerm {
-    pub accession: &'static str,
-    pub name: String,
-}
-
-impl<'de> serde::Deserialize<'de> for CvTerm {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        struct OwnedCvTerm {
-            accession: String,
-            name: String,
-        }
-
-        let value = OwnedCvTerm::deserialize(deserializer)?;
-        Ok(Self {
-            accession: intern_accession(value.accession),
-            name: value.name,
-        })
-    }
-}
-
-/// Return a `&'static str` for a deserialized accession.
-///
-/// `CvTerm::accession` is `&'static str`, so a deserialized value has to be
-/// leaked. Leak each distinct accession once and reuse it afterwards, so
-/// memory grows with the number of distinct accessions seen (a few hundred
-/// in practice) rather than with the number of terms deserialized.
-fn intern_accession(value: String) -> &'static str {
-    use std::collections::HashSet;
-    use std::sync::{Mutex, OnceLock};
-
-    static INTERNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
-    let mut set = INTERNED
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(existing) = set.get(value.as_str()) {
-        return existing;
-    }
-    let leaked: &'static str = Box::leak(value.into_boxed_str());
-    set.insert(leaked);
-    leaked
+    /// Accession, e.g. `"MS:1000563"`.
+    pub accession: Cow<'static, str>,
+    /// Exact CV name, e.g. `"Thermo RAW format"`.
+    pub name: Cow<'static, str>,
 }
 
 impl CvTerm {
-    pub fn new(accession: &'static str, name: impl Into<String>) -> Self {
+    /// Build a term from an accession and its exact CV name.
+    pub fn new(
+        accession: impl Into<Cow<'static, str>>,
+        name: impl Into<Cow<'static, str>>,
+    ) -> Self {
         Self {
-            accession,
+            accession: accession.into(),
             name: name.into(),
         }
     }
 }
 
+impl From<cv::Term> for CvTerm {
+    fn from(term: cv::Term) -> Self {
+        Self::new(term.accession(), term.name())
+    }
+}
+
 /// Precursor metadata for an MS2+ spectrum.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+///
+/// Build with `PrecursorInfo::default()` and the `with_*` setters.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct PrecursorInfo {
     /// Isolation-window center m/z (target).
     pub target_mz: Option<f64>,
@@ -81,6 +106,7 @@ pub struct PrecursorInfo {
     /// Total isolation width in m/z. The mzML writer splits this into
     /// symmetric lower/upper offsets around `target_mz`.
     pub isolation_width: Option<f64>,
+    /// Precursor charge state.
     pub charge: Option<i32>,
     /// Precursor intensity (when known).
     pub intensity: Option<f64>,
@@ -92,6 +118,7 @@ pub struct PrecursorInfo {
     /// this with the same string they will use as the `native_id` for that
     /// MS1 spectrum, so mzML `spectrumRef` lookups round-trip cleanly.
     pub precursor_native_id: Option<String>,
+    /// Activation (dissociation) method.
     pub activation: Option<Activation>,
     /// Analyzer that recorded the precursor scan; needed by mzML to
     /// disambiguate CID vs beam-type CID on FTMS instruments.
@@ -113,9 +140,50 @@ pub struct PrecursorInfo {
 /// `64-bit float` / `32-bit float` defaults are and what every downstream
 /// search engine expects. Vendors that decode lower-precision arrays should
 /// widen to these types.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+///
+/// # Example
+///
+/// A reader in another crate builds a record with [`SpectrumRecord::new`]
+/// and the `with_*` setters:
+///
+/// ```
+/// use openmassspec_core::{
+///     Activation, Analyzer, Polarity, PrecursorInfo, ScanMode, SpectrumRecord,
+/// };
+///
+/// let precursor = PrecursorInfo::default()
+///     .with_target_mz(445.12)
+///     .with_selected_mz(445.1201)
+///     .with_isolation_width(1.6)
+///     .with_charge(2)
+///     .with_collision_energy(30.0)
+///     .with_ce_is_nce(true)
+///     .with_activation(Activation::HCD)
+///     .with_precursor_native_id("controllerType=0 controllerNumber=1 scan=41".to_string());
+///
+/// let rec = SpectrumRecord::new(41, 42, "controllerType=0 controllerNumber=1 scan=42")
+///     .with_ms_level(2)
+///     .with_polarity(Polarity::Positive)
+///     .with_scan_mode(ScanMode::Centroid)
+///     .with_analyzer(Analyzer::FTMS)
+///     .with_retention_time_sec(12.5 * 60.0)
+///     .with_faims_cv(None) // `Option<T>` values are accepted too
+///     .with_precursor(precursor)
+///     .with_peaks(vec![150.1, 250.2], vec![10.0, 20.0])
+///     .with_extra("myreader.segment", "2");
+///
+/// assert_eq!(rec.ms_level, 2);
+/// assert_eq!(rec.precursor.as_ref().unwrap().charge, Some(2));
+/// // Public fields stay readable and assignable.
+/// let mut rec = rec;
+/// rec.filter = Some("FTMS + c NSI d Full ms2 445.12@hcd30.00".into());
+/// ```
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct SpectrumRecord {
-    /// Zero-based position in the source file (used as mzML `index=`).
+    /// Zero-based position in the source file. The mzML writer does not
+    /// copy it to `index=`; it numbers written spectra 0, 1, 2, ... so
+    /// skipped records leave no gaps.
     pub index: usize,
     /// One-based, source-stable scan number. For Bruker bundles this is a
     /// running counter assigned by the iterator (since PASEF frames produce
@@ -125,9 +193,13 @@ pub struct SpectrumRecord {
     /// the appropriate `controllerType=...`, `frame=... scan=...`, or
     /// `function=... process=... scan=...` literal.
     pub native_id: String,
+    /// MS level (1 for MS1, 2 for MS2, ...).
     pub ms_level: u32,
+    /// Scan polarity.
     pub polarity: Option<Polarity>,
+    /// Centroid or profile.
     pub scan_mode: Option<ScanMode>,
+    /// Mass analyzer that recorded this spectrum.
     pub analyzer: Option<Analyzer>,
     /// Numeric acquisition-event or grouping identifier decoded from the
     /// source file, when available.
@@ -151,6 +223,7 @@ pub struct SpectrumRecord {
     pub low_mz: Option<f64>,
     /// Highest observed m/z. If `None`, the writer uses `mz.last()`.
     pub high_mz: Option<f64>,
+    /// Ion injection (accumulation) time in milliseconds.
     pub ion_injection_time_ms: Option<f64>,
     /// Mean inverse reduced ion mobility (1/K0) for the spectrum, when
     /// applicable (Bruker timsTOF, Waters TWIMS).
@@ -159,8 +232,11 @@ pub struct SpectrumRecord {
     /// Pro interface and reports it per-scan (Thermo Orbitrap Fusion/Lumos/
     /// Eclipse/Ascend). `None` when not applicable or not decoded.
     pub faims_cv: Option<f64>,
+    /// Precursor information for MS2+ spectra.
     pub precursor: Option<PrecursorInfo>,
+    /// m/z values, ascending.
     pub mz: Vec<f64>,
+    /// Intensities, parallel to `mz`.
     pub intensity: Vec<f32>,
     /// Per-peak inverse reduced ion mobility, parallel to `mz` / `intensity`,
     /// when an IMS-resolved parser opts to preserve it. Length must equal
@@ -172,6 +248,50 @@ pub struct SpectrumRecord {
 }
 
 impl SpectrumRecord {
+    /// A record with the identifying fields set, `ms_level` 1, retention
+    /// time 0, no peaks, and every optional field `None`. Fill in the rest
+    /// with the `with_*` setters or by assigning the public fields.
+    pub fn new(index: usize, scan_number: u32, native_id: impl Into<String>) -> Self {
+        Self {
+            index,
+            scan_number,
+            native_id: native_id.into(),
+            ms_level: 1,
+            polarity: None,
+            scan_mode: None,
+            analyzer: None,
+            acquisition_event_id: None,
+            filter: None,
+            retention_time_sec: 0.0,
+            total_ion_current: None,
+            base_peak_mz: None,
+            base_peak_intensity: None,
+            low_mz: None,
+            high_mz: None,
+            ion_injection_time_ms: None,
+            inv_mobility: None,
+            faims_cv: None,
+            precursor: None,
+            mz: Vec::new(),
+            intensity: Vec::new(),
+            inv_mobility_per_peak: None,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    /// Set the `mz` and `intensity` arrays together.
+    pub fn with_peaks(mut self, mz: Vec<f64>, intensity: Vec<f32>) -> Self {
+        self.mz = mz;
+        self.intensity = intensity;
+        self
+    }
+
+    /// Insert one `extra` entry. Keys use `<reader>.<field>`.
+    pub fn with_extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra.insert(key.into(), value.into());
+        self
+    }
+
     /// Total ion current, computed from `intensity` when not pre-populated.
     pub fn effective_tic(&self) -> f64 {
         self.total_ion_current
@@ -203,42 +323,71 @@ impl SpectrumRecord {
     pub fn effective_mz_range(&self) -> Option<(f64, f64)> {
         match (self.low_mz, self.high_mz) {
             (Some(lo), Some(hi)) => Some((lo, hi)),
-            _ => {
-                if self.mz.is_empty() {
-                    None
-                } else {
-                    Some((*self.mz.first().unwrap(), *self.mz.last().unwrap()))
-                }
-            }
+            _ => match (self.mz.first(), self.mz.last()) {
+                (Some(&lo), Some(&hi)) => Some((lo, hi)),
+                _ => None,
+            },
         }
     }
 }
 
 /// A chromatogram trace (TIC, BPC, SRM/MRM transition).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct ChromatogramRecord {
+    /// Zero-based position in the source's chromatogram list. The mzML
+    /// writer numbers written chromatograms 0, 1, 2, ... for `index=`.
     pub index: usize,
+    /// mzML chromatogram `id`.
     pub id: String,
     /// e.g. `"total ion current chromatogram"`, `"basepeak chromatogram"`,
-    /// `"selected reaction monitoring chromatogram"`.
+    /// `"selected reaction monitoring chromatogram"`. The writer emits
+    /// `MS:1000235` (total ion current chromatogram) when `None`.
     pub chromatogram_type: Option<CvTerm>,
+    /// Precursor (Q1) m/z for SRM/MRM traces.
     pub precursor_mz: Option<f64>,
+    /// Product (Q3) m/z for SRM/MRM traces.
     pub product_mz: Option<f64>,
     /// Retention time in seconds.
     pub time_sec: Vec<f32>,
+    /// Intensities, parallel to `time_sec`.
     pub intensity: Vec<f32>,
+}
+
+impl ChromatogramRecord {
+    /// A chromatogram with the given id and arrays and no type, precursor,
+    /// or product.
+    pub fn new(
+        index: usize,
+        id: impl Into<String>,
+        time_sec: Vec<f32>,
+        intensity: Vec<f32>,
+    ) -> Self {
+        Self {
+            index,
+            id: id.into(),
+            chromatogram_type: None,
+            precursor_mz: None,
+            product_mz: None,
+            time_sec,
+            intensity,
+        }
+    }
 }
 
 /// Run-level metadata.
 ///
-/// Vendors construct this once per file. The mzML writer uses it to populate
+/// Vendors construct this once per file with [`RunMetadata::new`] and the
+/// `with_*` setters. The mzML writer uses it to populate
 /// `<fileDescription>`, `<sourceFileList>`, `<instrumentConfigurationList>`
 /// and `<softwareList>`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct RunMetadata {
     /// The source file name to put in `<sourceFile name="...">`. Typically
     /// `Path::file_name()`; for directory-based formats (Bruker `.d/`,
-    /// Waters `.raw/`), the directory name.
+    /// Waters `.raw/`), the directory name. The `<run id>` is derived from
+    /// it (sanitized to a valid `xs:ID`).
     pub source_file_name: String,
     /// PSI-MS CV term for the source file format, e.g.
     /// `("MS:1000563", "Thermo RAW format")`.
@@ -252,8 +401,11 @@ pub struct RunMetadata {
     /// exposes one. Emitted as `MS:1000529` ("instrument serial number") on
     /// the default `instrumentConfiguration`.
     pub instrument_serial_number: Option<String>,
-    /// Software identifier (e.g. `"opentfraw"`).
+    /// Software identifier (e.g. `"opentfraw"`). The `<software id>` is
+    /// derived from it (sanitized to a valid `xs:ID`); the unmodified name
+    /// is the value of the software's `MS:1000799` cvParam.
     pub software_name: String,
+    /// Version of `software_name`.
     pub software_version: String,
     /// Name of the original vendor acquisition software that recorded this
     /// run (e.g. `"Xcalibur"`, `"MassHunter"`, `"Analyst"`, `"LabSolutions"`),
@@ -271,7 +423,7 @@ pub struct RunMetadata {
     pub start_timestamp: Option<String>,
     /// Interpretation of any per-peak ion mobility array carried by the
     /// spectra in this run. `None` is treated as the Bruker convention
-    /// ([`MobilityArrayKind::InverseReducedVsPerCm2`]) for back-compat.
+    /// ([`MobilityArrayKind::InverseReducedVsPerCm2`]).
     pub mobility_array_kind: Option<MobilityArrayKind>,
     /// Physical mass-analyzer components this instrument has, in a stable
     /// order. Static instrument configuration, not derived from scan data -
@@ -291,80 +443,179 @@ pub struct RunMetadata {
     pub extra: BTreeMap<String, String>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn deserialized_accessions_are_interned_once() {
-        let json = r#"{"accession":"MS:1000563","name":"Thermo RAW format"}"#;
-        let a: CvTerm = serde_json::from_str(json).unwrap();
-        let b: CvTerm = serde_json::from_str(json).unwrap();
-        assert_eq!(a, CvTerm::new("MS:1000563", "Thermo RAW format"));
-        // Same allocation: the second deserialize reused the first leak.
-        assert!(std::ptr::eq(a.accession, b.accession));
-    }
-
-    fn spectrum() -> SpectrumRecord {
-        SpectrumRecord {
-            index: 0,
-            scan_number: 1,
-            native_id: "scan=1".into(),
-            ms_level: 1,
-            polarity: Some(Polarity::Positive),
-            scan_mode: Some(ScanMode::Centroid),
-            analyzer: Some(Analyzer::TOFMS),
-            acquisition_event_id: Some(17),
-            filter: None,
-            retention_time_sec: 1.5,
-            total_ion_current: None,
-            base_peak_mz: None,
-            base_peak_intensity: None,
-            low_mz: None,
-            high_mz: None,
-            ion_injection_time_ms: None,
-            inv_mobility: None,
-            faims_cv: None,
-            precursor: None,
-            mz: vec![100.0],
-            intensity: vec![12.0],
-            inv_mobility_per_peak: None,
-            extra: BTreeMap::from([("openszraw.event_label".into(), "survey".into())]),
-        }
-    }
-
-    fn run_metadata() -> RunMetadata {
-        RunMetadata {
-            source_file_name: "test.raw".into(),
-            source_file_format: CvTerm::new("MS:1000563", "Thermo RAW format"),
-            native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
-            instrument: CvTerm::new("MS:1001911", "Q Exactive"),
+impl RunMetadata {
+    /// Metadata with the required fields set and every optional field
+    /// `None` or empty.
+    pub fn new(
+        source_file_name: impl Into<String>,
+        source_file_format: CvTerm,
+        native_id_format: CvTerm,
+        instrument: CvTerm,
+        software_name: impl Into<String>,
+        software_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            source_file_name: source_file_name.into(),
+            source_file_format,
+            native_id_format,
+            instrument,
             instrument_serial_number: None,
-            software_name: "test-reader".into(),
-            software_version: "1.0".into(),
+            software_name: software_name.into(),
+            software_version: software_version.into(),
             acquisition_software_name: None,
             acquisition_software_version: None,
             start_timestamp: None,
             mobility_array_kind: None,
             analyzers: Vec::new(),
-            extra: BTreeMap::from([("openwraw.source_type".into(), "ESI".into())]),
+            extra: BTreeMap::new(),
         }
     }
 
-    #[test]
-    fn serde_round_trips_vendor_extras_and_acquisition_event_id() {
-        let spectrum: SpectrumRecord =
-            serde_json::from_str(&serde_json::to_string(&spectrum()).unwrap()).unwrap();
-        assert_eq!(spectrum.acquisition_event_id, Some(17));
-        assert_eq!(spectrum.extra["openszraw.event_label"], "survey");
+    /// Insert one `extra` entry. Keys use `<reader>.<field>`.
+    pub fn with_extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra.insert(key.into(), value.into());
+        self
+    }
+}
 
-        let metadata: RunMetadata =
-            serde_json::from_str(&serde_json::to_string(&run_metadata()).unwrap()).unwrap();
-        assert_eq!(metadata.extra["openwraw.source_type"], "ESI");
+setters!(SpectrumRecord {
+    val with_index index: usize,
+    val with_scan_number scan_number: u32,
+    into with_native_id native_id: String,
+    val with_ms_level ms_level: u32,
+    opt with_polarity polarity: Polarity,
+    opt with_scan_mode scan_mode: ScanMode,
+    opt with_analyzer analyzer: Analyzer,
+    opt with_acquisition_event_id acquisition_event_id: u32,
+    opt with_filter filter: String,
+    val with_retention_time_sec retention_time_sec: f64,
+    opt with_total_ion_current total_ion_current: f64,
+    opt with_base_peak_mz base_peak_mz: f64,
+    opt with_base_peak_intensity base_peak_intensity: f64,
+    opt with_low_mz low_mz: f64,
+    opt with_high_mz high_mz: f64,
+    opt with_ion_injection_time_ms ion_injection_time_ms: f64,
+    opt with_inv_mobility inv_mobility: f64,
+    opt with_faims_cv faims_cv: f64,
+    opt with_precursor precursor: PrecursorInfo,
+    val with_mz mz: Vec<f64>,
+    val with_intensity intensity: Vec<f32>,
+    opt with_inv_mobility_per_peak inv_mobility_per_peak: Vec<f32>,
+    val with_extra_map extra: BTreeMap<String, String>,
+});
+
+setters!(PrecursorInfo {
+    opt with_target_mz target_mz: f64,
+    opt with_selected_mz selected_mz: f64,
+    opt with_isolation_width isolation_width: f64,
+    opt with_charge charge: i32,
+    opt with_intensity intensity: f64,
+    opt with_collision_energy collision_energy: f64,
+    val with_ce_is_nce ce_is_nce: bool,
+    opt with_precursor_native_id precursor_native_id: String,
+    opt with_activation activation: Activation,
+    opt with_analyzer analyzer: Analyzer,
+    opt with_ccs ccs: f64,
+});
+
+setters!(ChromatogramRecord {
+    val with_index index: usize,
+    into with_id id: String,
+    opt with_chromatogram_type chromatogram_type: CvTerm,
+    opt with_precursor_mz precursor_mz: f64,
+    opt with_product_mz product_mz: f64,
+    val with_time_sec time_sec: Vec<f32>,
+    val with_intensity intensity: Vec<f32>,
+});
+
+setters!(RunMetadata {
+    into with_source_file_name source_file_name: String,
+    val with_source_file_format source_file_format: CvTerm,
+    val with_native_id_format native_id_format: CvTerm,
+    val with_instrument instrument: CvTerm,
+    opt with_instrument_serial_number instrument_serial_number: String,
+    into with_software_name software_name: String,
+    into with_software_version software_version: String,
+    opt with_acquisition_software_name acquisition_software_name: String,
+    opt with_acquisition_software_version acquisition_software_version: String,
+    opt with_start_timestamp start_timestamp: String,
+    opt with_mobility_array_kind mobility_array_kind: MobilityArrayKind,
+    val with_analyzers analyzers: Vec<Analyzer>,
+    val with_extra_map extra: BTreeMap<String, String>,
+});
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialized_cv_terms_own_their_strings() {
+        let json = r#"{"accession":"MS:1000563","name":"Thermo RAW format"}"#;
+        let a: CvTerm = serde_json::from_str(json).unwrap();
+        assert_eq!(a, CvTerm::new("MS:1000563", "Thermo RAW format"));
+        assert!(matches!(a.accession, Cow::Owned(_)));
+        assert!(matches!(a.name, Cow::Owned(_)));
+        let generated: CvTerm = cv::PEAK_PICKING.into();
+        assert!(matches!(generated.accession, Cow::Borrowed("MS:1000035")));
+    }
+
+    fn spectrum() -> SpectrumRecord {
+        SpectrumRecord::new(0, 1, "scan=1")
+            .with_polarity(Polarity::Positive)
+            .with_scan_mode(ScanMode::Centroid)
+            .with_analyzer(Analyzer::TOFMS)
+            .with_acquisition_event_id(17)
+            .with_retention_time_sec(1.5)
+            .with_peaks(vec![100.0], vec![12.0])
+            .with_extra("openszraw.event_label", "survey")
+    }
+
+    fn run_metadata() -> RunMetadata {
+        RunMetadata::new(
+            "test.raw",
+            CvTerm::new("MS:1000563", "Thermo RAW format"),
+            CvTerm::new("MS:1000768", "Thermo nativeID format"),
+            CvTerm::new("MS:1001911", "Q Exactive"),
+            "test-reader",
+            "1.0",
+        )
+        .with_extra("openwraw.source_type", "ESI")
     }
 
     #[test]
-    fn serde_defaults_new_fields_when_reading_old_records() {
+    fn setters_accept_values_and_options() {
+        let rec = SpectrumRecord::new(3, 4, "scan=4")
+            .with_faims_cv(-45.0)
+            .with_low_mz(None)
+            .with_filter(Some("f".to_string()));
+        assert_eq!(rec.faims_cv, Some(-45.0));
+        assert_eq!(rec.low_mz, None);
+        assert_eq!(rec.filter.as_deref(), Some("f"));
+        assert_eq!(rec.ms_level, 1);
+    }
+
+    #[test]
+    fn serde_round_trips_records() {
+        let s = spectrum();
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SpectrumRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+        assert_eq!(back.extra["openszraw.event_label"], "survey");
+
+        let m = run_metadata();
+        let json = serde_json::to_string(&m).unwrap();
+        let back: RunMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, m);
+
+        let c = ChromatogramRecord::new(0, "TIC", vec![0.0, 1.0], vec![2.0, 3.0])
+            .with_chromatogram_type(CvTerm::from(cv::TOTAL_ION_CURRENT_CHROMATOGRAM));
+        let json = serde_json::to_string(&c).unwrap();
+        let back: ChromatogramRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn serde_defaults_optional_fields_when_absent() {
         let mut spectrum_json = serde_json::to_value(spectrum()).unwrap();
         let spectrum_object = spectrum_json.as_object_mut().unwrap();
         spectrum_object.remove("acquisition_event_id");

@@ -1,9 +1,10 @@
-//! End-to-end smoke test: build a minimal `SpectrumSource`, write mzML,
-//! check the output is well-formed XML and contains the expected spectra.
+//! End-to-end smoke test: build a minimal `SpectrumSource` the way a reader
+//! crate would (constructors and setters only), write mzML, and check the
+//! output contains the expected spectra.
 
 use openmassspec_core::{
     write_indexed_mzml, write_mzml, Activation, Analyzer, CvTerm, MsPower, Polarity, PrecursorInfo,
-    RunMetadata, ScanMode, SpectrumRecord, SpectrumSource,
+    RunMetadata, ScanMode, SpectrumIter, SpectrumRecord, SpectrumSource,
 };
 
 struct ToySource {
@@ -14,83 +15,52 @@ struct ToySource {
 
 impl ToySource {
     fn new() -> Self {
-        let meta = RunMetadata {
-            source_file_name: "toy.raw".into(),
-            source_file_format: CvTerm::new("MS:1000563", "Thermo RAW format"),
-            native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
-            instrument: CvTerm::new("MS:1001911", "Q Exactive"),
-            instrument_serial_number: None,
-            software_name: "toy-writer".into(),
-            software_version: "0.0.0".into(),
-            acquisition_software_name: None,
-            acquisition_software_version: None,
-            start_timestamp: None,
-            mobility_array_kind: None,
-            analyzers: Vec::new(),
-            extra: Default::default(),
-        };
-        let s1 = SpectrumRecord {
-            index: 0,
-            scan_number: 1,
-            native_id: "controllerType=0 controllerNumber=1 scan=1".into(),
-            ms_level: MsPower::Ms1.ms_level(),
-            polarity: Some(Polarity::Positive),
-            scan_mode: Some(ScanMode::Centroid),
-            analyzer: Some(Analyzer::FTMS),
-            acquisition_event_id: None,
-            filter: Some("FTMS + p ESI Full ms".into()),
-            retention_time_sec: 0.123 * 60.0,
-            total_ion_current: None,
-            base_peak_mz: None,
-            base_peak_intensity: None,
-            low_mz: None,
-            high_mz: None,
-            ion_injection_time_ms: Some(20.0),
-            inv_mobility: None,
-            faims_cv: None,
-            precursor: None,
-            mz: vec![100.0, 200.0, 300.0],
-            intensity: vec![1.0, 5.0, 2.0],
-            inv_mobility_per_peak: None,
-            extra: Default::default(),
-        };
-        let s2 = SpectrumRecord {
-            index: 1,
-            scan_number: 2,
-            native_id: "controllerType=0 controllerNumber=1 scan=2".into(),
-            ms_level: MsPower::Ms2.ms_level(),
-            polarity: Some(Polarity::Positive),
-            scan_mode: Some(ScanMode::Centroid),
-            analyzer: Some(Analyzer::FTMS),
-            acquisition_event_id: None,
-            filter: Some("FTMS + p ESI d Full ms2 200.00@hcd28.00".into()),
-            retention_time_sec: 0.5 * 60.0,
-            total_ion_current: Some(123.45),
-            base_peak_mz: Some(150.5),
-            base_peak_intensity: Some(99.0),
-            low_mz: Some(100.0),
-            high_mz: Some(180.0),
-            ion_injection_time_ms: Some(50.0),
-            inv_mobility: None,
-            faims_cv: Some(-45.0),
-            precursor: Some(PrecursorInfo {
-                target_mz: Some(200.0),
-                selected_mz: Some(200.001),
-                isolation_width: Some(2.0),
-                charge: Some(2),
-                intensity: None,
-                collision_energy: Some(28.0),
-                ce_is_nce: true,
-                precursor_native_id: Some("controllerType=0 controllerNumber=1 scan=1".into()),
-                activation: Some(Activation::CID),
-                analyzer: Some(Analyzer::FTMS),
-                ccs: None,
-            }),
-            mz: vec![150.5, 160.0],
-            intensity: vec![99.0, 50.0],
-            inv_mobility_per_peak: None,
-            extra: Default::default(),
-        };
+        let meta = RunMetadata::new(
+            "toy.raw",
+            CvTerm::new("MS:1000563", "Thermo RAW format"),
+            CvTerm::new("MS:1000768", "Thermo nativeID format"),
+            CvTerm::new("MS:1001911", "Q Exactive"),
+            "toy-writer",
+            "0.0.0",
+        );
+        let s1 = SpectrumRecord::new(0, 1, "controllerType=0 controllerNumber=1 scan=1")
+            .with_ms_level(MsPower::Ms1.ms_level())
+            .with_polarity(Polarity::Positive)
+            .with_scan_mode(ScanMode::Centroid)
+            .with_analyzer(Analyzer::FTMS)
+            .with_filter("FTMS + p ESI Full ms".to_string())
+            .with_retention_time_sec(0.123 * 60.0)
+            .with_ion_injection_time_ms(20.0)
+            .with_peaks(vec![100.0, 200.0, 300.0], vec![1.0, 5.0, 2.0]);
+        let s2 = SpectrumRecord::new(1, 2, "controllerType=0 controllerNumber=1 scan=2")
+            .with_ms_level(MsPower::Ms2.ms_level())
+            .with_polarity(Polarity::Positive)
+            .with_scan_mode(ScanMode::Centroid)
+            .with_analyzer(Analyzer::FTMS)
+            .with_filter("FTMS + p ESI d Full ms2 200.00@hcd28.00".to_string())
+            .with_retention_time_sec(0.5 * 60.0)
+            .with_total_ion_current(123.45)
+            .with_base_peak_mz(150.5)
+            .with_base_peak_intensity(99.0)
+            .with_low_mz(100.0)
+            .with_high_mz(180.0)
+            .with_ion_injection_time_ms(50.0)
+            .with_faims_cv(-45.0)
+            .with_precursor(
+                PrecursorInfo::default()
+                    .with_target_mz(200.0)
+                    .with_selected_mz(200.001)
+                    .with_isolation_width(2.0)
+                    .with_charge(2)
+                    .with_collision_energy(28.0)
+                    .with_ce_is_nce(true)
+                    .with_precursor_native_id(
+                        "controllerType=0 controllerNumber=1 scan=1".to_string(),
+                    )
+                    .with_activation(Activation::CID)
+                    .with_analyzer(Analyzer::FTMS),
+            )
+            .with_peaks(vec![150.5, 160.0], vec![99.0, 50.0]);
         Self {
             meta,
             spectra: vec![s1, s2],
@@ -104,16 +74,12 @@ impl SpectrumSource for ToySource {
         self.meta.clone()
     }
 
-    fn iter_spectra<'a>(&'a mut self) -> Box<dyn Iterator<Item = SpectrumRecord> + 'a> {
+    fn iter_spectra<'a>(&'a mut self) -> SpectrumIter<'a> {
         self.cursor = 0;
         Box::new(std::iter::from_fn(move || {
-            if self.cursor >= self.spectra.len() {
-                None
-            } else {
-                let rec = self.spectra[self.cursor].clone();
-                self.cursor += 1;
-                Some(rec)
-            }
+            let rec = self.spectra.get(self.cursor)?.clone();
+            self.cursor += 1;
+            Some(Ok(rec))
         }))
     }
 
@@ -126,7 +92,8 @@ impl SpectrumSource for ToySource {
 fn writes_plain_mzml() {
     let mut src = ToySource::new();
     let mut buf = Vec::new();
-    write_mzml(&mut src, &mut buf).unwrap();
+    let summary = write_mzml(&mut src, &mut buf).unwrap();
+    assert_eq!(summary.spectra_written, 2);
     let s = String::from_utf8(buf).unwrap();
 
     assert!(s.starts_with(r#"<?xml version="1.0" encoding="utf-8"?>"#));
@@ -164,7 +131,10 @@ fn writes_indexed_mzml() {
 fn effective_helpers_compute_from_arrays() {
     let mut src = ToySource::new();
     // s1 has no pre-populated TIC; should sum to 8.0.
-    let recs: Vec<_> = src.iter_spectra().collect();
+    let recs: Vec<_> = src
+        .iter_spectra()
+        .collect::<openmassspec_core::Result<_>>()
+        .unwrap();
     assert_eq!(recs[0].effective_tic(), 8.0);
     let (bp_mz, bp_i) = recs[0].effective_base_peak().unwrap();
     assert!((bp_mz - 200.0).abs() < 1e-9);

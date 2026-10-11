@@ -1,12 +1,11 @@
-//! Integration coverage for the indexed-mzML `<fileChecksum>` trailer
-//! (issue #11).
+//! Integration coverage for the indexed-mzML `<fileChecksum>` trailer.
 //!
 //! `write_indexed_mzml` computes its `fileChecksum` with a hand-rolled,
 //! internal SHA-1 (see `src/mzml.rs`) so the crate doesn't need a crypto
 //! dependency just for this one footer. That implementation has its own
-//! unit tests against NIST vectors in `src/mzml.rs`, but nothing exercised
-//! the actual code path that feeds a generated document's bytes through it.
-//! This test covers that path: it generates a small indexed-mzML document
+//! unit tests against NIST vectors in `src/mzml.rs`; this test covers the
+//! code path that feeds a generated document's bytes through it: it
+//! generates a small indexed-mzML document
 //! through the public API, recomputes SHA-1 over the same bytes with a
 //! second, independent implementation written here, and asserts the two
 //! agree.
@@ -16,7 +15,8 @@
 //! (the same scope ProteoWizard and mzdata use).
 
 use openmassspec_core::{
-    write_indexed_mzml, CvTerm, Polarity, RunMetadata, ScanMode, SpectrumRecord, SpectrumSource,
+    write_indexed_mzml, CvTerm, Polarity, RunMetadata, ScanMode, SpectrumIter, SpectrumRecord,
+    SpectrumSource,
 };
 
 // ---------- independent SHA-1 (whole-message, non-streaming) ---------------
@@ -93,46 +93,18 @@ struct OneSpectrumSource {
 impl OneSpectrumSource {
     fn new() -> Self {
         Self {
-            meta: RunMetadata {
-                source_file_name: "checksum-fixture.raw".into(),
-                source_file_format: CvTerm::new("MS:1000563", "Thermo RAW format"),
-                native_id_format: CvTerm::new("MS:1000768", "Thermo nativeID format"),
-                instrument: CvTerm::new("MS:1001911", "Q Exactive"),
-                instrument_serial_number: None,
-                acquisition_software_name: None,
-                acquisition_software_version: None,
-                software_name: "checksum-test".into(),
-                software_version: "0.0.0".into(),
-                start_timestamp: None,
-                mobility_array_kind: None,
-                analyzers: Vec::new(),
-                extra: Default::default(),
-            },
-            spectrum: SpectrumRecord {
-                index: 0,
-                scan_number: 1,
-                native_id: "controllerType=0 controllerNumber=1 scan=1".into(),
-                ms_level: 1,
-                polarity: Some(Polarity::Positive),
-                scan_mode: Some(ScanMode::Centroid),
-                analyzer: None,
-                acquisition_event_id: None,
-                filter: None,
-                retention_time_sec: 0.0,
-                total_ion_current: None,
-                base_peak_mz: None,
-                base_peak_intensity: None,
-                low_mz: None,
-                high_mz: None,
-                ion_injection_time_ms: None,
-                inv_mobility: None,
-                faims_cv: None,
-                precursor: None,
-                mz: vec![100.0, 200.0, 300.0],
-                intensity: vec![10.0, 5.0, 1.0],
-                inv_mobility_per_peak: None,
-                extra: Default::default(),
-            },
+            meta: RunMetadata::new(
+                "checksum-fixture.raw",
+                CvTerm::new("MS:1000563", "Thermo RAW format"),
+                CvTerm::new("MS:1000768", "Thermo nativeID format"),
+                CvTerm::new("MS:1001911", "Q Exactive"),
+                "checksum-test",
+                "0.0.0",
+            ),
+            spectrum: SpectrumRecord::new(0, 1, "controllerType=0 controllerNumber=1 scan=1")
+                .with_polarity(Polarity::Positive)
+                .with_scan_mode(ScanMode::Centroid)
+                .with_peaks(vec![100.0, 200.0, 300.0], vec![10.0, 5.0, 1.0]),
         }
     }
 }
@@ -142,8 +114,8 @@ impl SpectrumSource for OneSpectrumSource {
         self.meta.clone()
     }
 
-    fn iter_spectra<'a>(&'a mut self) -> Box<dyn Iterator<Item = SpectrumRecord> + 'a> {
-        Box::new(std::iter::once(self.spectrum.clone()))
+    fn iter_spectra<'a>(&'a mut self) -> SpectrumIter<'a> {
+        Box::new(std::iter::once(Ok(self.spectrum.clone())))
     }
 
     fn spectrum_count_hint(&self) -> Option<usize> {

@@ -1,0 +1,22 @@
+[package]
+name = "openmassspec-arrow"
+description = "Apache Arrow RecordBatch bridge for openmassspec-core spectrum records."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/openmassspec-arrow"
+keywords = ["mass-spectrometry", "arrow", "proteomics", "metabolomics"]
+categories = ["science", "encoding"]
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+openmassspec-core = { version = "3.0.0", path = "../.." }
+arrow-array = "60"
+arrow-schema = "60"

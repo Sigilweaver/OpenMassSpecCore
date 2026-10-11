@@ -1,35 +1,42 @@
-[package]
-name = "openmassspec-core"
-description = "Shared types, traits, and mzML writer for open Rust mass-spec parsers."
-version = "2.0.1"
+[workspace]
+resolver = "2"
+members = [".", "crates/openmassspec-arrow"]
+
+[workspace.package]
+version = "3.0.0"
 edition = "2021"
 rust-version = "1.88"
 authors = ["Nathan Riley <git@nathanriley.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/Sigilweaver/OpenMassSpecCore"
 homepage = "https://sigilweaver.app/openmassspec/docs/"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[package]
+name = "openmassspec-core"
+description = "Shared types, traits, and mzML writer for open Rust mass-spec parsers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/openmassspec-core"
 keywords = ["mass-spectrometry", "mzml", "proteomics", "metabolomics", "psi-ms"]
 categories = ["science", "encoding"]
 readme = "README.md"
+exclude = ["/crates", "/.github"]
 
 [package.metadata.docs.rs]
-all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
-[lints.rust]
-unsafe_code = "forbid"
-
-[features]
-default = []
-# Build a zero-copy Apache Arrow `RecordBatch` from a stream of
-# `SpectrumRecord`s. Pulls in the `arrow-array` / `arrow-schema` crates.
-arrow = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-buffer"]
+[lints]
+workspace = true
 
 [dependencies]
-arrow-array = { version = "60", optional = true }
-arrow-schema = { version = "60", optional = true }
-arrow-buffer = { version = "60", optional = true }
 thiserror = "2"
 # Default features (`rust_backend`, i.e. miniz_oxide) are a pure-safe-Rust
 # zlib implementation with no C compiler / system zlib requirement, matching

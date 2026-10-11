@@ -1,6 +1,6 @@
 # CI for OpenMassSpecCore.
 #
-# Standalone crate, no path-dependent siblings. Runs fmt + clippy + test
+# Workspace: openmassspec-core plus crates/openmassspec-arrow. Runs fmt + clippy + test
 # on Linux and macOS, a 1.88 MSRV check, and mzML schema validation of
 # the canonical writer's output against the vendored PSI-MS XSD.
 
