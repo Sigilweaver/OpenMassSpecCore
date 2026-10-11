@@ -3,7 +3,7 @@
 [![CI](https://github.com/Sigilweaver/OpenMassSpecCore/actions/workflows/ci.yml/badge.svg)](https://github.com/Sigilweaver/OpenMassSpecCore/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/openmassspec-core.svg)](https://crates.io/crates/openmassspec-core)
 [![docs.rs](https://img.shields.io/docsrs/openmassspec-core)](https://docs.rs/openmassspec-core)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/Sigilweaver/OpenMassSpecCore/blob/main/LICENSE)
 [![Rust MSRV](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 
 > Part of the [OpenMassSpec](https://sigilweaver.app/openmassspec/docs/)
@@ -165,8 +165,8 @@ this harness on any vendor input or pre-existing mzML.
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md).
+See [CHANGELOG.md](https://github.com/Sigilweaver/OpenMassSpecCore/blob/main/CHANGELOG.md).
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](https://github.com/Sigilweaver/OpenMassSpecCore/blob/main/LICENSE).
