@@ -181,7 +181,9 @@ pub struct PrecursorInfo {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct SpectrumRecord {
-    /// Zero-based position in the source file (used as mzML `index=`).
+    /// Zero-based position in the source file. The mzML writer does not
+    /// copy it to `index=`; it numbers written spectra 0, 1, 2, ... so
+    /// skipped records leave no gaps.
     pub index: usize,
     /// One-based, source-stable scan number. For Bruker bundles this is a
     /// running counter assigned by the iterator (since PASEF frames produce
@@ -333,7 +335,8 @@ impl SpectrumRecord {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct ChromatogramRecord {
-    /// Zero-based position in the chromatogram list (mzML `index=`).
+    /// Zero-based position in the source's chromatogram list. The mzML
+    /// writer numbers written chromatograms 0, 1, 2, ... for `index=`.
     pub index: usize,
     /// mzML chromatogram `id`.
     pub id: String,

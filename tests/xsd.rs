@@ -24,6 +24,11 @@ struct Source {
     chroms: Vec<ChromatogramRecord>,
     /// Yield an `Err` between the spectra.
     with_error: bool,
+    /// Yield an `Err` after the last spectrum and in place of the
+    /// chromatogram.
+    with_more_errors: bool,
+    /// Return `None` from `spectrum_count_hint`.
+    no_hint: bool,
 }
 
 fn spectrum(index: usize, ms_level: u32, precursor: Option<PrecursorInfo>) -> SpectrumRecord {
@@ -79,6 +84,8 @@ impl Source {
             .with_precursor_mz(524.3)
             .with_product_mz(136.1)],
             with_error: false,
+            with_more_errors: false,
+            no_hint: false,
         }
     }
 }
@@ -91,15 +98,34 @@ impl SpectrumSource for Source {
         let error = self
             .with_error
             .then(|| Err(Error::Format("corrupt scan".into())));
+        let trailing = self
+            .with_more_errors
+            .then(|| Err(Error::Format("corrupt last scan".into())));
         let mut spectra = self.spectra.iter().cloned().map(Ok);
         let first = spectra.next();
-        Box::new(first.into_iter().chain(error).chain(spectra))
+        Box::new(
+            first
+                .into_iter()
+                .chain(error)
+                .chain(spectra)
+                .chain(trailing),
+        )
     }
     fn iter_chromatograms<'a>(&'a mut self) -> ChromatogramIter<'a> {
-        Box::new(self.chroms.clone().into_iter().map(Ok))
+        let error = self
+            .with_more_errors
+            .then(|| Err(Error::Format("corrupt chromatogram".into())));
+        Box::new(
+            error
+                .into_iter()
+                .chain(self.chroms.clone().into_iter().map(Ok)),
+        )
     }
     fn spectrum_count_hint(&self) -> Option<usize> {
-        Some(self.spectra.len())
+        // Counts the failing records too, as a reader that knows its scan
+        // count but not which scans will fail would.
+        let failing = usize::from(self.with_error) + usize::from(self.with_more_errors);
+        (!self.no_hint).then_some(self.spectra.len() + failing)
     }
 }
 
@@ -155,22 +181,68 @@ fn awkward_file_and_software_names_validate_against_xsd() {
     }
 }
 
+/// The `count` attribute of `<{list}`, the `index` attributes of every
+/// `<{elem}`, in document order.
+fn count_and_indexes(doc: &str, list: &str, elem: &str) -> (Option<usize>, Vec<usize>) {
+    fn attr(tag: &str, name: &str) -> usize {
+        let key = format!(" {name}=\"");
+        let start = tag.find(&key).unwrap() + key.len();
+        let len = tag[start..].find('"').unwrap();
+        tag[start..start + len].parse().unwrap()
+    }
+    let tag_at = |i: usize| &doc[i..i + doc[i..].find('>').unwrap()];
+    let count = doc
+        .find(&format!("<{list} "))
+        .map(|i| attr(tag_at(i), "count"));
+    let indexes = doc
+        .match_indices(&format!("<{elem} "))
+        .map(|(i, _)| attr(tag_at(i), "index"))
+        .collect();
+    (count, indexes)
+}
+
 #[test]
 fn document_with_skipped_records_validates_against_xsd() {
     if !xmllint_available() {
         eprintln!("skipping: xmllint not installed");
         return;
     }
-    let mut src = Source::new("skip.raw", "xsd-test");
-    src.with_error = true;
     let opts = WriteOptions::new().with_record_error_policy(RecordErrorPolicy::Skip);
+    for (more_errors, no_hint) in [(false, false), (true, false), (true, true)] {
+        let mut src = Source::new("skip.raw", "xsd-test");
+        src.with_error = true;
+        src.with_more_errors = more_errors;
+        src.no_hint = no_hint;
+        // Source positions with the failing records counted, as a reader
+        // would number them.
+        src.spectra[1].index = 2;
+        if more_errors {
+            src.chroms[0].index = 1;
+        }
 
-    let mut plain = Vec::new();
-    let summary = write_mzml_with_options(&mut src, &mut plain, &opts).unwrap();
-    assert_eq!(summary.spectra_skipped, 1);
-    validate(&plain, "mzML1.1.0.xsd", "xsd_skip_plain.mzML");
+        let mut plain = Vec::new();
+        let summary = write_mzml_with_options(&mut src, &mut plain, &opts).unwrap();
+        assert_eq!(summary.spectra_written, 2);
+        assert_eq!(summary.spectra_skipped, 1 + usize::from(more_errors));
+        assert_eq!(summary.chromatograms_skipped, usize::from(more_errors));
+        validate(&plain, "mzML1.1.0.xsd", "xsd_skip_plain.mzML");
 
-    let mut indexed = Vec::new();
-    write_indexed_mzml_with_options(&mut src, &mut indexed, &opts).unwrap();
-    validate(&indexed, "mzML1.1.2_idx.xsd", "xsd_skip_indexed.mzML");
+        let mut indexed = Vec::new();
+        write_indexed_mzml_with_options(&mut src, &mut indexed, &opts).unwrap();
+        validate(&indexed, "mzML1.1.2_idx.xsd", "xsd_skip_indexed.mzML");
+
+        for doc in [&plain, &indexed] {
+            let doc = std::str::from_utf8(doc).unwrap();
+            assert_eq!(
+                count_and_indexes(doc, "spectrumList", "spectrum"),
+                (Some(2), vec![0, 1])
+            );
+            // The failing chromatogram (when present) comes first, so the
+            // written one must be renumbered to 0.
+            assert_eq!(
+                count_and_indexes(doc, "chromatogramList", "chromatogram"),
+                (Some(1), vec![0])
+            );
+        }
+    }
 }

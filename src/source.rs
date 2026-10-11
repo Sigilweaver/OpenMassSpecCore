@@ -120,8 +120,8 @@ pub trait SpectrumSource {
     }
 
     /// Total number of spectra the source will yield, when known cheaply.
-    /// The mzML writer uses it as the `<spectrumList count="...">` value,
-    /// and writes `count="0"` when this is `None`.
+    /// A sizing hint for consumers. The mzML writer does not use it: its
+    /// `<spectrumList count>` is the number of spectra actually written.
     fn spectrum_count_hint(&self) -> Option<usize> {
         None
     }

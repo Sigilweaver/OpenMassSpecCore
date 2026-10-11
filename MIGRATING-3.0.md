@@ -232,6 +232,26 @@ if summary.skipped() > 0 {
 }
 ```
 
+The writer signatures still take any `W: Write` (a `File`, a
+`BufWriter<File>`, a `Vec<u8>`, stdout). What changed in the output:
+
+- `<spectrumList count>` is the number of spectra written, so it no longer
+  depends on `spectrum_count_hint()`. Keep implementing the hint if you
+  have it cheaply; it is no longer needed for valid output.
+- Spectrum and chromatogram `index` attributes are numbered 0, 1, 2, ... in
+  written order. `SpectrumRecord::index` stays the source position and is
+  not written. Code or tests that matched `index="N"` against source
+  positions must use the written position (or match on `id`).
+- To know the count before the list starts, the writer holds encoded
+  spectra in memory up to 64 MiB and then in a temporary file in
+  `std::env::temp_dir()`, removed when the write ends. A large run needs
+  free space there about the size of the output. CLIs that convert large
+  files should point it at the output's directory:
+
+```rust
+let opts = WriteOptions::new().with_spool_dir(out_path.parent().unwrap_or(Path::new(".")));
+```
+
 ## 7. `additional_processing_steps` returns `Vec<CvTerm>`
 
 Only adapters override this. `vec![("MS:1000035", "peak picking")]` becomes

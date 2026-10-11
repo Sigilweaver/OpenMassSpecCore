@@ -95,7 +95,15 @@ assert_eq!(summary.spectra_written, 1);
 To keep writing past undecodable records, pass
 `WriteOptions::new().with_record_error_policy(RecordErrorPolicy::Skip)` to
 `write_mzml_with_options` / `write_indexed_mzml_with_options`. The returned
-`WriteSummary` reports how many spectra and chromatograms were skipped.
+`WriteSummary` reports how many spectra and chromatograms were skipped. The
+document stays valid: list counts are the elements actually written and
+`index` attributes are consecutive.
+
+The writer holds encoded spectra until the source is exhausted so it can
+write the real `<spectrumList count>` first: in memory up to 64 MiB, then in
+a temporary file in `std::env::temp_dir()` (set another directory with
+`WriteOptions::with_spool_dir`). A large run needs free space there about the
+size of the output.
 
 ## Public API
 

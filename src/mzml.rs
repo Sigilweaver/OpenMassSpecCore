@@ -22,7 +22,10 @@
 //! [`RunMetadata`](crate::RunMetadata) and records as [`CvTerm`] values.
 
 use std::fmt::Display;
-use std::io::{self, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufWriter, Seek, SeekFrom, Write};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use flate2::write::ZlibEncoder;
 use flate2::Compression as ZlibLevel;
@@ -319,6 +322,146 @@ fn activation_terms(act: Activation, analyzer: Option<Analyzer>) -> &'static [Te
     }
 }
 
+// ---------- spectrum spool --------------------------------------------------
+
+/// Bytes of spooled `<spectrum>` elements kept in memory before the spool
+/// moves to a temporary file.
+const SPOOL_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+
+/// Holds the written `<spectrum>` elements until the final count is known,
+/// so `<spectrumList count>` can be written before them. Small runs stay in
+/// memory; larger ones spill to a temporary file that is removed on drop.
+struct Spool {
+    len: u64,
+    /// In-memory bytes allowed before spilling to a file.
+    memory_limit: usize,
+    dir: PathBuf,
+    state: SpoolState,
+}
+
+enum SpoolState {
+    Memory(Vec<u8>),
+    File(BufWriter<File>, TempPath),
+}
+
+/// A temporary file path. [`TempPath::remove`] deletes it and reports
+/// failure; dropping it without that (a write that is already returning an
+/// error) deletes it best-effort, since that error is the one to report.
+struct TempPath(Option<PathBuf>);
+
+impl TempPath {
+    fn path(&self) -> &std::path::Path {
+        self.0.as_deref().expect("spool path present until removed")
+    }
+
+    fn remove(mut self) -> io::Result<()> {
+        let path = self.0.take().expect("spool path present until removed");
+        fs::remove_file(&path).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("cannot remove spool file {}: {e}", path.display()),
+            )
+        })
+    }
+}
+
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+impl Spool {
+    fn new(dir: PathBuf, memory_limit: usize) -> Self {
+        Self {
+            len: 0,
+            memory_limit,
+            dir,
+            state: SpoolState::Memory(Vec::new()),
+        }
+    }
+
+    fn spill(&mut self) -> io::Result<()> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let SpoolState::Memory(buf) = &mut self.state else {
+            return Ok(());
+        };
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let path = self.dir.join(format!(
+            "openmassspec-spool-{}-{nanos}-{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("cannot create spool file {}: {e}", path.display()),
+                )
+            })?;
+        let path = TempPath(Some(path));
+        let mut file = BufWriter::with_capacity(1 << 20, file);
+        file.write_all(buf)?;
+        self.state = SpoolState::File(file, path);
+        Ok(())
+    }
+
+    /// Copy everything spooled into `out`.
+    fn copy_into<W: Write>(self, out: &mut W) -> io::Result<()> {
+        match self.state {
+            SpoolState::Memory(buf) => out.write_all(&buf),
+            SpoolState::File(file, path) => {
+                let mut file = file.into_inner().map_err(|e| e.into_error())?;
+                file.seek(SeekFrom::Start(0))?;
+                // The reader (and the file handle) is dropped at the end of
+                // this statement, so the file can be removed on any OS.
+                let copied = io::copy(&mut io::BufReader::with_capacity(1 << 20, file), out)?;
+                if copied != self.len {
+                    return Err(io::Error::other(format!(
+                        "spool file {} returned {copied} of {} bytes",
+                        path.path().display(),
+                        self.len
+                    )));
+                }
+                path.remove()
+            }
+        }
+    }
+}
+
+impl Write for Spool {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let SpoolState::Memory(mem) = &self.state {
+            if mem.len() + buf.len() > self.memory_limit {
+                self.spill()?;
+            }
+        }
+        let n = match &mut self.state {
+            SpoolState::Memory(mem) => {
+                mem.extend_from_slice(buf);
+                buf.len()
+            }
+            SpoolState::File(file, _) => file.write(buf)?,
+        };
+        self.len += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match &mut self.state {
+            SpoolState::Memory(_) => Ok(()),
+            SpoolState::File(file, _) => file.flush(),
+        }
+    }
+}
+
 // ---------- options and summary ----------------------------------------------
 
 /// What the writer does when the source yields an `Err` record.
@@ -329,10 +472,10 @@ pub enum RecordErrorPolicy {
     #[default]
     Fail,
     /// Leave the failed record out and keep writing. Each skipped record is
-    /// counted in [`WriteSummary`]. The `<spectrumList count>` attribute is
-    /// written before iteration starts, from
-    /// [`SpectrumSource::spectrum_count_hint`], so it still includes skipped
-    /// spectra; compare it against [`WriteSummary::spectra_written`].
+    /// counted in [`WriteSummary`]. The written document stays valid: the
+    /// `<spectrumList count>` / `<chromatogramList count>` attributes give
+    /// the number of elements actually written, and their `index`
+    /// attributes are consecutive from 0 in written order.
     Skip,
 }
 
@@ -354,6 +497,10 @@ pub struct WriteOptions {
     pub compression: Compression,
     /// Handling of `Err` records. Defaults to [`RecordErrorPolicy::Fail`].
     pub record_error_policy: RecordErrorPolicy,
+    /// Directory for the temporary file that holds written spectra once
+    /// they pass 64 MiB (see [`write_mzml_with_options`]). `None`, the
+    /// default, uses [`std::env::temp_dir`].
+    pub spool_dir: Option<PathBuf>,
 }
 
 impl WriteOptions {
@@ -373,6 +520,13 @@ impl WriteOptions {
     #[must_use]
     pub fn with_record_error_policy(mut self, policy: RecordErrorPolicy) -> Self {
         self.record_error_policy = policy;
+        self
+    }
+
+    /// Set the directory for the spectrum spool file.
+    #[must_use]
+    pub fn with_spool_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.spool_dir = Some(dir.into());
         self
     }
 }
@@ -407,8 +561,8 @@ impl WriteSummary {
 ///
 /// # Errors
 ///
-/// Returns the first `Err` the source yields, or an I/O error from `out`.
-/// `out` then holds a truncated document.
+/// Returns the first `Err` the source yields, or an I/O error from `out` or
+/// the spool file. `out` then holds an incomplete document.
 pub fn write_mzml<S: SpectrumSource + ?Sized, W: Write>(
     src: &mut S,
     out: &mut W,
@@ -419,19 +573,38 @@ pub fn write_mzml<S: SpectrumSource + ?Sized, W: Write>(
 /// Write the source's spectra as mzML 1.1.0 (un-indexed) with explicit
 /// [`WriteOptions`].
 ///
+/// `<spectrumList count>` is the number of `<spectrum>` elements written,
+/// whatever [`SpectrumSource::spectrum_count_hint`] says, and each
+/// spectrum's `index` attribute is its 0-based position in the written list
+/// (the source's [`SpectrumRecord::index`] is not used; `id` carries the
+/// native id). To know the count before the list starts, the writer holds
+/// the encoded spectra until the source is exhausted: in memory up to
+/// 64 MiB, then in a temporary file in [`WriteOptions::spool_dir`] that is
+/// removed when the write ends. A large run therefore needs free space
+/// there about the size of the output.
+///
 /// # Errors
 ///
-/// Returns an I/O error from `out`, or the first `Err` the source yields
-/// unless `opts` selects [`RecordErrorPolicy::Skip`]. `out` then holds a
-/// truncated document.
+/// Returns an I/O error from `out` or the spool file, or the first `Err` the
+/// source yields unless `opts` selects [`RecordErrorPolicy::Skip`]. `out`
+/// then holds an incomplete document.
 pub fn write_mzml_with_options<S: SpectrumSource + ?Sized, W: Write>(
     src: &mut S,
     out: &mut W,
     opts: &WriteOptions,
 ) -> Result<WriteSummary> {
+    write_plain(src, out, opts, SPOOL_MEMORY_LIMIT)
+}
+
+fn write_plain<S: SpectrumSource + ?Sized, W: Write>(
+    src: &mut S,
+    out: &mut W,
+    opts: &WriteOptions,
+    spool_memory_limit: usize,
+) -> Result<WriteSummary> {
     let mut cw = CountingWriter::new(out);
     cw.hashing = false;
-    let body = write_body(src, &mut cw, opts, false)?;
+    let body = write_body(src, &mut cw, opts, false, spool_memory_limit)?;
     writeln!(cw, r#"</mzML>"#)?;
     Ok(body.summary)
 }
@@ -442,8 +615,8 @@ pub fn write_mzml_with_options<S: SpectrumSource + ?Sized, W: Write>(
 ///
 /// # Errors
 ///
-/// Returns the first `Err` the source yields, or an I/O error from `out`.
-/// `out` then holds a truncated document.
+/// Returns the first `Err` the source yields, or an I/O error from `out` or
+/// the spool file. `out` then holds an incomplete document.
 pub fn write_indexed_mzml<S: SpectrumSource + ?Sized, W: Write>(
     src: &mut S,
     out: &mut W,
@@ -458,20 +631,30 @@ pub fn write_indexed_mzml<S: SpectrumSource + ?Sized, W: Write>(
 /// `out`, from the start of the document up to and including the
 /// `<fileChecksum>` open tag, as mzML 1.1 specifies. Each `<offset>` and the
 /// `<indexListOffset>` give the byte position of the element's `<`. Skipped
-/// records have no index entry.
+/// records have no index entry. List counts, `index` attributes, and the
+/// spectrum spool work as in [`write_mzml_with_options`].
 ///
 /// # Errors
 ///
-/// Returns an I/O error from `out`, or the first `Err` the source yields
-/// unless `opts` selects [`RecordErrorPolicy::Skip`]. `out` then holds a
-/// truncated document.
+/// Returns an I/O error from `out` or the spool file, or the first `Err` the
+/// source yields unless `opts` selects [`RecordErrorPolicy::Skip`]. `out`
+/// then holds an incomplete document.
 pub fn write_indexed_mzml_with_options<S: SpectrumSource + ?Sized, W: Write>(
     src: &mut S,
     out: &mut W,
     opts: &WriteOptions,
 ) -> Result<WriteSummary> {
+    write_indexed(src, out, opts, SPOOL_MEMORY_LIMIT)
+}
+
+fn write_indexed<S: SpectrumSource + ?Sized, W: Write>(
+    src: &mut S,
+    out: &mut W,
+    opts: &WriteOptions,
+    spool_memory_limit: usize,
+) -> Result<WriteSummary> {
     let mut cw = CountingWriter::new(out);
-    let body = write_body(src, &mut cw, opts, true)?;
+    let body = write_body(src, &mut cw, opts, true, spool_memory_limit)?;
     writeln!(cw, r#"  </mzML>"#)?;
 
     cw.write_all(b"  ")?;
@@ -532,18 +715,23 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
     cw: &mut CountingWriter<'_, W>,
     opts: &WriteOptions,
     indexed: bool,
+    spool_memory_limit: usize,
 ) -> Result<Body> {
     let meta = src.run_metadata();
     let ids = DocumentIds::new(&meta);
-    let count = src.spectrum_count_hint().unwrap_or(0);
     let mobility_kind = meta.mobility_array_kind;
     let analyzer_ic_ids = analyzer_ic_table(&meta.analyzers);
     let extra_processing = src.additional_processing_steps();
     let compression = opts.compression;
     let skip = opts.record_error_policy == RecordErrorPolicy::Skip;
 
-    write_prologue(cw, &meta, &ids, count, indexed, &extra_processing)?;
+    write_prologue(cw, &meta, &ids, indexed, &extra_processing)?;
 
+    // Spectra go to the spool first so `<spectrumList count>` can be the
+    // number actually written. Offsets are relative to the spool until it
+    // is copied into `cw`.
+    let spool_dir = opts.spool_dir.clone().unwrap_or_else(std::env::temp_dir);
+    let mut spool = Spool::new(spool_dir, spool_memory_limit);
     let mut summary = WriteSummary::default();
     let mut spectrum_offsets = Vec::new();
     for item in src.iter_spectra() {
@@ -556,12 +744,29 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
             Err(e) => return Err(e),
         };
         // Offsets point at the element's `<`, so write the indent first.
-        cw.write_all(RECORD_INDENT.as_bytes())?;
+        spool.write_all(RECORD_INDENT.as_bytes())?;
         if indexed {
-            spectrum_offsets.push((rec.native_id.clone(), cw.pos));
+            spectrum_offsets.push((rec.native_id.clone(), spool.len));
         }
-        write_spectrum(cw, &rec, mobility_kind, &analyzer_ic_ids, compression)?;
+        write_spectrum(
+            &mut spool,
+            &rec,
+            summary.spectra_written,
+            mobility_kind,
+            &analyzer_ic_ids,
+            compression,
+        )?;
         summary.spectra_written += 1;
+    }
+    writeln!(
+        cw,
+        r#"    <spectrumList count="{}" defaultDataProcessingRef="dp1">"#,
+        summary.spectra_written
+    )?;
+    let spool_start = cw.pos;
+    spool.copy_into(cw)?;
+    for (_, offset) in &mut spectrum_offsets {
+        *offset += spool_start;
     }
     writeln!(cw, r#"    </spectrumList>"#)?;
 
@@ -585,7 +790,7 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
             if indexed {
                 chromatogram_offsets.push((rec.id.clone(), cw.pos));
             }
-            write_chromatogram(cw, rec, compression)?;
+            write_chromatogram(cw, rec, summary.chromatograms_written, compression)?;
             summary.chromatograms_written += 1;
         }
         writeln!(cw, r#"    </chromatogramList>"#)?;
@@ -669,7 +874,6 @@ fn write_prologue<W: Write>(
     out: &mut W,
     meta: &RunMetadata,
     ids: &DocumentIds,
-    n_spectra: usize,
     indexed: bool,
     extra_processing: &[CvTerm],
 ) -> io::Result<()> {
@@ -842,11 +1046,6 @@ fn write_prologue<W: Write>(
             escape(value)
         )?;
     }
-    writeln!(
-        out,
-        r#"    <spectrumList count="{}" defaultDataProcessingRef="dp1">"#,
-        n_spectra
-    )?;
     Ok(())
 }
 
@@ -877,9 +1076,11 @@ fn analyzer_ic_table(analyzers: &[Analyzer]) -> Vec<(Analyzer, String)> {
         .collect()
 }
 
+/// Write one `<spectrum>`. `index` is its position in the written list.
 fn write_spectrum<W: Write>(
     out: &mut W,
     rec: &SpectrumRecord,
+    index: usize,
     mobility_kind: Option<MobilityArrayKind>,
     analyzer_ic_ids: &[(Analyzer, String)],
     compression: Compression,
@@ -902,7 +1103,7 @@ fn write_spectrum<W: Write>(
         out,
         r#"<spectrum id="{sid}" index="{idx}" defaultArrayLength="{n}">"#,
         sid = escape(&rec.native_id),
-        idx = rec.index,
+        idx = index,
         n = n_peaks
     )?;
     cv_param(out, I, cv::MS_LEVEL, rec.ms_level)?;
@@ -1209,9 +1410,11 @@ fn write_binary_array<W: Write>(
     Ok(())
 }
 
+/// Write one `<chromatogram>`. `index` is its position in the written list.
 fn write_chromatogram<W: Write>(
     out: &mut W,
     rec: &ChromatogramRecord,
+    index: usize,
     compression: Compression,
 ) -> io::Result<()> {
     let n = rec.time_sec.len();
@@ -1220,7 +1423,7 @@ fn write_chromatogram<W: Write>(
         out,
         r#"<chromatogram id="{id}" index="{idx}" defaultArrayLength="{n}">"#,
         id = escape(&rec.id),
-        idx = rec.index,
+        idx = index,
     )?;
 
     match &rec.chromatogram_type {
@@ -1322,6 +1525,16 @@ mod tests {
         failing_spectra: Vec<usize>,
         /// Positions in `chroms` that are yielded as `Err` instead.
         failing_chroms: Vec<usize>,
+        count_hint: CountHint,
+    }
+
+    /// What [`ToySource`] returns from `spectrum_count_hint`.
+    #[derive(Clone, Copy)]
+    enum CountHint {
+        /// `Some(spectra.len())`, failing positions included.
+        Len,
+        None,
+        Fixed(usize),
     }
 
     fn decode_error(what: &str, i: usize) -> crate::Error {
@@ -1343,6 +1556,7 @@ mod tests {
                 extra_processing: Vec::new(),
                 failing_spectra: Vec::new(),
                 failing_chroms: Vec::new(),
+                count_hint: CountHint::Len,
             }
         }
     }
@@ -1389,7 +1603,11 @@ mod tests {
         }
 
         fn spectrum_count_hint(&self) -> Option<usize> {
-            Some(self.spectra.len())
+            match self.count_hint {
+                CountHint::Len => Some(self.spectra.len()),
+                CountHint::None => None,
+                CountHint::Fixed(n) => Some(n),
+            }
         }
 
         fn additional_processing_steps(&self) -> Vec<CvTerm> {
@@ -2009,6 +2227,221 @@ mod tests {
                 assert_eq!(s.matches("<offset ").count(), 3);
             }
         }
+    }
+
+    /// The value of `attr="..."` in `tag`.
+    fn attr<'a>(tag: &'a str, attr: &str) -> &'a str {
+        let key = format!(" {attr}=\"");
+        let start = tag.find(&key).unwrap() + key.len();
+        let len = tag[start..].find('"').unwrap();
+        &tag[start..start + len]
+    }
+
+    /// Check that `<{list} count>` equals the number of `<{elem}>` elements,
+    /// that their `index` attributes are 0, 1, 2, ... in document order, and
+    /// return their ids in order.
+    fn check_list(s: &str, list: &str, elem: &str) -> Vec<String> {
+        let open = format!("<{elem} ");
+        let tags: Vec<&str> = s
+            .match_indices(&open)
+            .map(|(i, _)| &s[i..i + s[i..].find('>').unwrap()])
+            .collect();
+        for (i, tag) in tags.iter().enumerate() {
+            assert_eq!(attr(tag, "index"), i.to_string(), "{tag}");
+        }
+        match s.find(&format!("<{list} ")) {
+            Some(i) => {
+                let list_tag = &s[i..i + s[i..].find('>').unwrap()];
+                assert_eq!(attr(list_tag, "count"), tags.len().to_string());
+            }
+            None => assert!(tags.is_empty()),
+        }
+        tags.iter().map(|t| attr(t, "id").to_string()).collect()
+    }
+
+    /// Check list counts, consecutive indexes, and, for indexed mzML, that
+    /// every `<offset>` and `<indexListOffset>` points at its element and
+    /// the `<fileChecksum>` matches. Returns the spectrum count.
+    fn check_document(buf: &[u8], indexed: bool) -> usize {
+        let s = std::str::from_utf8(buf).unwrap();
+        let spectra = check_list(s, "spectrumList", "spectrum");
+        let chroms = check_list(s, "chromatogramList", "chromatogram");
+        if !indexed {
+            assert!(!s.contains("<indexList"));
+            return spectra.len();
+        }
+        let mut offsets = Vec::new();
+        for line in s.lines() {
+            let Some(rest) = line.trim().strip_prefix("<offset idRef=\"") else {
+                continue;
+            };
+            let (id, rest) = rest.split_once('"').unwrap();
+            let offset: usize = rest
+                .trim_start_matches('>')
+                .trim_end_matches("</offset>")
+                .parse()
+                .unwrap();
+            offsets.push((id.to_string(), offset));
+        }
+        assert_eq!(offsets.len(), spectra.len() + chroms.len());
+        for ((id, offset), (elem, expected)) in offsets.iter().zip(
+            spectra
+                .iter()
+                .map(|id| ("spectrum", id))
+                .chain(chroms.iter().map(|id| ("chromatogram", id))),
+        ) {
+            assert_eq!(id, expected);
+            assert!(
+                s[*offset..].starts_with(&format!("<{elem} id=\"{id}\"")),
+                "offset {offset} for {id:?} points at {:?}",
+                &s[*offset..(*offset + 30).min(s.len())]
+            );
+        }
+        let start = s.find("<indexListOffset>").unwrap() + "<indexListOffset>".len();
+        let end = s.find("</indexListOffset>").unwrap();
+        let offset: usize = s[start..end].parse().unwrap();
+        assert!(s[offset..].starts_with("<indexList "));
+
+        let tag = "<fileChecksum>";
+        let digest_start = s.find(tag).unwrap() + tag.len();
+        let digest_end = s.find("</fileChecksum>").unwrap();
+        assert_eq!(&s[digest_start..digest_end], sha1_hex(&buf[..digest_start]));
+        spectra.len()
+    }
+
+    fn write_with(src: &mut ToySource, opts: &WriteOptions, indexed: bool) -> Vec<u8> {
+        let mut buf = Vec::new();
+        if indexed {
+            write_indexed_mzml_with_options(src, &mut buf, opts).unwrap();
+        } else {
+            write_mzml_with_options(src, &mut buf, opts).unwrap();
+        }
+        buf
+    }
+
+    #[test]
+    fn skip_policy_writes_real_counts_and_consecutive_indexes() {
+        let mut src = ToySource::new();
+        src.spectra = (0..6)
+            .map(|i| {
+                let mut r = minimal_spectrum(i, None);
+                r.native_id = format!("controllerType=0 controllerNumber=1 scan={}", i + 1);
+                r
+            })
+            .collect();
+        src.failing_spectra = vec![0, 2, 3];
+        src.chroms = vec![tic_chromatogram(0), srm_chromatogram(1)];
+        src.failing_chroms = vec![0];
+        let opts = WriteOptions::new().with_record_error_policy(RecordErrorPolicy::Skip);
+
+        for indexed in [false, true] {
+            let buf = write_with(&mut src, &opts, indexed);
+            assert_eq!(check_document(&buf, indexed), 3);
+            let s = String::from_utf8(buf).unwrap();
+            assert!(s.contains(r#"<spectrumList count="3" "#));
+            // Source native ids are kept in `id`; `index` is renumbered.
+            assert!(s.contains(
+                r#"<spectrum id="controllerType=0 controllerNumber=1 scan=2" index="0" "#
+            ));
+            assert!(s.contains(
+                r#"<spectrum id="controllerType=0 controllerNumber=1 scan=6" index="2" "#
+            ));
+            assert!(s.contains(r#"<chromatogramList count="1" "#));
+            assert!(s.contains(r#"<chromatogram id="SRM SIC Q1=524.3 Q3=136.1" index="0" "#));
+        }
+    }
+
+    #[test]
+    fn spectrum_count_ignores_missing_or_wrong_hint() {
+        for hint in [CountHint::None, CountHint::Fixed(1), CountHint::Fixed(99)] {
+            let mut src = ToySource::new();
+            src.spectra = (0..3)
+                .map(|i| {
+                    let mut r = minimal_spectrum(i, None);
+                    r.native_id = format!("scan={}", i + 1);
+                    r
+                })
+                .collect();
+            src.count_hint = hint;
+            for indexed in [false, true] {
+                let buf = write_with(&mut src, &WriteOptions::new(), indexed);
+                assert_eq!(check_document(&buf, indexed), 3);
+            }
+        }
+    }
+
+    #[test]
+    fn empty_source_writes_zero_count() {
+        let mut src = ToySource::new();
+        src.spectra.clear();
+        src.count_hint = CountHint::Fixed(5);
+        for indexed in [false, true] {
+            let buf = write_with(&mut src, &WriteOptions::new(), indexed);
+            assert_eq!(check_document(&buf, indexed), 0);
+            let s = String::from_utf8(buf).unwrap();
+            assert!(s.contains(r#"<spectrumList count="0" "#));
+        }
+    }
+
+    /// A fresh, empty spool directory under the system temp dir.
+    fn spool_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "openmassspec-spool-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn spilled_spool_matches_in_memory_output_and_is_removed() {
+        let dir = spool_test_dir("spill");
+        let mut src = ToySource::new();
+        src.spectra = (0..5)
+            .map(|i| {
+                let mut r = minimal_spectrum(i, None);
+                r.native_id = format!("scan={}", i + 1);
+                r
+            })
+            .collect();
+        src.failing_spectra = vec![1];
+        src.chroms = vec![tic_chromatogram(0)];
+        let opts = WriteOptions::new()
+            .with_record_error_policy(RecordErrorPolicy::Skip)
+            .with_spool_dir(&dir);
+
+        for indexed in [false, true] {
+            let in_memory = write_with(&mut src, &opts, indexed);
+            let mut spilled = Vec::new();
+            // A 1-byte limit spills on the first write.
+            let summary = if indexed {
+                write_indexed(&mut src, &mut spilled, &opts, 1).unwrap()
+            } else {
+                write_plain(&mut src, &mut spilled, &opts, 1).unwrap()
+            };
+            assert_eq!(summary.spectra_written, 4);
+            assert_eq!(spilled, in_memory);
+            assert_eq!(check_document(&spilled, indexed), 4);
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "spool file left");
+        }
+
+        // The spool file is also removed when the write fails.
+        let fail = WriteOptions::new().with_spool_dir(&dir);
+        assert!(write_plain(&mut src, &mut Vec::new(), &fail, 1).is_err());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "spool file left");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unusable_spool_dir_is_an_io_error() {
+        let dir = spool_test_dir("missing").join("does-not-exist");
+        let mut src = ToySource::new();
+        let opts = WriteOptions::new().with_spool_dir(&dir);
+        let err = write_plain(&mut src, &mut Vec::new(), &opts, 1).unwrap_err();
+        assert!(matches!(err, crate::Error::Io(_)), "{err:?}");
+        assert!(err.to_string().contains("spool file"), "{err}");
+        fs::remove_dir_all(dir.parent().unwrap()).unwrap();
     }
 
     #[test]

@@ -59,6 +59,8 @@ additions are minor releases. Reader authors: see
   `with_extra` on `SpectrumRecord` and `RunMetadata`.
 - `WriteOptions`, `RecordErrorPolicy` (`Fail` by default, opt-in `Skip`),
   and `WriteSummary` (spectra and chromatograms written and skipped).
+- `WriteOptions::spool_dir` / `with_spool_dir`: where the writer puts its
+  temporary spectrum file (default `std::env::temp_dir()`).
 - `as_str` on `Polarity`, `ScanMode`, `Analyzer`, `Activation`, and
   `MobilityArrayKind`: the stable labels used in Arrow batches.
 - `PartialEq` on `SpectrumRecord`, `PrecursorInfo`, `ChromatogramRecord`,
@@ -81,6 +83,19 @@ additions are minor releases. Reader authors: see
   with spaces or a leading digit failed XSD validation. It is sanitized like
   `<run id>` (prefix `software_`), and `<run id>` never collides with it.
   The `MS:1000799` cvParam keeps the original name as its value.
+- mzML writer: `<spectrumList count>` is the number of `<spectrum>`
+  elements written. It was taken from `spectrum_count_hint()` before
+  iteration, so it was `0` when the hint was `None`, wrong when the hint
+  was wrong, and included skipped spectra under `RecordErrorPolicy::Skip`.
+  The writer now holds encoded spectra until the source is exhausted (in
+  memory up to 64 MiB, then in a temporary file in
+  `WriteOptions::spool_dir`, removed when the write ends), then writes the
+  list. Indexed-mzML offsets and `<fileChecksum>` cover the final bytes.
+  The writer signatures are unchanged (`W: Write`).
+- mzML writer: spectrum and chromatogram `index` attributes are 0-based and
+  consecutive in written order, as mzML requires. They were copied from
+  `SpectrumRecord::index` / `ChromatogramRecord::index`, so skipped records
+  left gaps. `id` still carries the source native id / chromatogram id.
 - `CvTerm` deserialization no longer leaks or interns strings; deserialized
   terms own their strings.
 - Readers can no longer drop decode errors through `SpectrumSource`, and the
