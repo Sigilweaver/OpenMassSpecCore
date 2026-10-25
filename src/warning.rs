@@ -27,6 +27,9 @@ pub enum WarningKind {
     DanglingPrecursorRef,
     /// Centroiding was requested but not applied to this spectrum.
     CentroidNotApplied,
+    /// The precursor has a collision energy whose unit the reader did not
+    /// state; it was written without a unit.
+    UnknownCollisionEnergyUnit,
     /// A code defined by a reader crate or a newer Core.
     Other(Cow<'static, str>),
 }
@@ -38,6 +41,7 @@ impl WarningKind {
             Self::UnknownScanMode => "unknown_scan_mode",
             Self::DanglingPrecursorRef => "dangling_precursor_ref",
             Self::CentroidNotApplied => "centroid_not_applied",
+            Self::UnknownCollisionEnergyUnit => "unknown_collision_energy_unit",
             Self::Other(code) => code,
         }
     }
@@ -50,6 +54,7 @@ impl WarningKind {
             "unknown_scan_mode" => Self::UnknownScanMode,
             "dangling_precursor_ref" => Self::DanglingPrecursorRef,
             "centroid_not_applied" => Self::CentroidNotApplied,
+            "unknown_collision_energy_unit" => Self::UnknownCollisionEnergyUnit,
             other => Self::Other(Cow::Owned(other.to_string())),
         }
     }

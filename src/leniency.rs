@@ -22,17 +22,25 @@ pub enum Check {
     /// A precursor that names a spectrum not in the output: the
     /// `spectrumRef` is dropped.
     DanglingPrecursorRef,
+    /// A precursor with a collision energy and no unit: the value is
+    /// written as a unit-less userParam instead of a cvParam.
+    UnknownCollisionEnergyUnit,
 }
 
 impl Check {
     /// Every check this version knows.
-    pub const ALL: &'static [Check] = &[Check::UnknownScanMode, Check::DanglingPrecursorRef];
+    pub const ALL: &'static [Check] = &[
+        Check::UnknownScanMode,
+        Check::DanglingPrecursorRef,
+        Check::UnknownCollisionEnergyUnit,
+    ];
 
     /// Stable name (`"unknown_scan_mode"`, ...).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::UnknownScanMode => "unknown_scan_mode",
             Self::DanglingPrecursorRef => "dangling_precursor_ref",
+            Self::UnknownCollisionEnergyUnit => "unknown_collision_energy_unit",
         }
     }
 }

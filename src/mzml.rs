@@ -1297,6 +1297,9 @@ struct WriteFlags {
     /// Leave the precursor `spectrumRef` out (it names a spectrum that is
     /// not in the output, leniently).
     drop_precursor_ref: bool,
+    /// Write the collision energy as a unit-less userParam (unit unknown,
+    /// leniently).
+    unitless_collision_energy: bool,
     /// Warnings the writer adds to the ones on the record.
     warnings: Vec<Warning>,
 }
@@ -1364,7 +1367,14 @@ fn check_spectrum_for_write(
     }
     if let Some(p) = &rec.precursor {
         if p.collision_energy.is_some() && p.collision_energy_unit.is_none() {
-            return Err(RecordProblem::CollisionEnergyUnitUnknown);
+            if !leniency.allows(Check::UnknownCollisionEnergyUnit) {
+                return Err(RecordProblem::CollisionEnergyUnitUnknown);
+            }
+            flags.unitless_collision_energy = true;
+            flags.warnings.push(Warning::new(
+                WarningKind::UnknownCollisionEnergyUnit,
+                "collision energy written without a unit; the reader did not say eV or NCE",
+            ));
         }
     }
     Ok(flags)
@@ -1626,7 +1636,10 @@ fn write_spectrum<W: Write>(
             }
         }
         if let Some(e) = pre.collision_energy {
-            if pre.collision_energy_unit == Some(CollisionEnergyUnit::Nce) {
+            if flags.unitless_collision_energy {
+                // Unit unknown: neither eV nor NCE is asserted.
+                // (userParams follow the cvParams, so it is written below.)
+            } else if pre.collision_energy_unit == Some(CollisionEnergyUnit::Nce) {
                 cv_param_with_unit(
                     out,
                     P,
@@ -1645,6 +1658,12 @@ fn write_spectrum<W: Write>(
             }
         }
         // userParams follow the cvParams.
+        if let (true, Some(e)) = (flags.unitless_collision_energy, pre.collision_energy) {
+            writeln!(
+                out,
+                r#"              <userParam name="openmassspec: collision energy (unit unknown)" value="{e:.2}"/>"#
+            )?;
+        }
         match pre.activation {
             Some(act) if activation_terms(act).is_empty() => writeln!(
                 out,
@@ -3461,5 +3480,26 @@ mod tests {
             .map(|p| p.with_collision_energy_unit(CollisionEnergyUnit::Ev));
         let (s, _) = write_one(ev, &WriteOptions::new()).unwrap();
         assert!(s.contains("unitName=\"electronvolt\""));
+    }
+
+    #[test]
+    fn lenient_unknown_collision_energy_unit_writes_a_unitless_userparam() {
+        let mut rec = minimal_spectrum(0, None);
+        rec.ms_level = 2;
+        rec.precursor = Some(
+            crate::PrecursorInfo::default()
+                .with_selected_mz(500.0)
+                .with_collision_energy(30.0),
+        );
+        let opts = WriteOptions::new()
+            .with_leniency(Leniency::strict().with(Check::UnknownCollisionEnergyUnit));
+        let (s, summary) = write_one(rec, &opts).unwrap();
+        assert!(!s.contains("MS:1000045"), "must not claim eV");
+        assert!(!s.contains("MS:1000138"), "must not claim NCE");
+        assert!(s.contains(r#"name="openmassspec: collision energy (unit unknown)" value="30.00""#));
+        assert_eq!(
+            summary.warning_counts.get("unknown_collision_energy_unit"),
+            Some(&1)
+        );
     }
 }

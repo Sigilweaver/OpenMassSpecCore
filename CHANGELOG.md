@@ -78,12 +78,14 @@ Files that convert today can fail or read differently:
   `RunMetadata` (`with_warnings`, `with_warning`). The writer emits each as
   `<userParam name="openmassspec: warning CODE" value="MESSAGE"/>` and
   counts them per code in `WriteSummary::warning_counts`.
-- `Leniency` and `Check` (`UnknownScanMode`, `DanglingPrecursorRef`):
+- `Leniency` and `Check` (`UnknownScanMode`, `DanglingPrecursorRef`,
+  `UnknownCollisionEnergyUnit`):
   `WriteOptions::with_leniency` and `Centroided::with_leniency` let the
   named checks continue instead of failing. Each affected record gets a
   `Warning`: a spectrum of unknown scan mode is written with no
   profile/centroid term (or left unchanged by `Centroided`), and a dangling
-  precursor `spectrumRef` is dropped. Check names (`as_str`, `FromStr`) are
+  precursor `spectrumRef` is dropped, and a collision energy with no unit is
+  written as a unit-less userParam. Check names (`as_str`, `FromStr`) are
   what command lines and Python keywords accept.
 - `WriteSummary::issues` (`WriteIssue`, `RecordKind`), `issues_truncated`,
   `warning_counts`, `spectrum_count_mismatch` (source count hint differs from
