@@ -246,7 +246,7 @@ fn pick_peaks(
 mod tests {
     use super::*;
     use crate::conformance::assert_source_invariants;
-    use crate::{MsPower, Polarity};
+    use crate::Polarity;
 
     struct OneSpectrumSource {
         meta: RunMetadata,
@@ -313,7 +313,7 @@ mod tests {
             index: 0,
             scan_number: 1,
             native_id: "scan=1".into(),
-            ms_level: MsPower::Ms1.ms_level(),
+            ms_level: 1,
             polarity: Some(Polarity::Positive),
             scan_mode: Some(ScanMode::Profile),
             analyzer: None,

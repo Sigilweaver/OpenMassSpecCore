@@ -13,8 +13,8 @@ use std::io::{BufWriter, Write};
 
 use openmassspec_core::{
     write_indexed_mzml, write_mzml, Activation, Analyzer, ChromatogramIter, ChromatogramRecord,
-    CvTerm, MobilityArrayKind, MsPower, Polarity, PrecursorInfo, RunMetadata, ScanMode,
-    SpectrumIter, SpectrumRecord, SpectrumSource,
+    CvTerm, MobilityArrayKind, Polarity, PrecursorInfo, RunMetadata, ScanMode, SpectrumIter,
+    SpectrumRecord, SpectrumSource,
 };
 
 struct SampleSource {
@@ -51,7 +51,7 @@ impl SampleSource {
         .with_extra("openmassspec.sample_source", "synthetic");
 
         let ms1 = SpectrumRecord::new(0, 1, "controllerType=0 controllerNumber=1 scan=1")
-            .with_ms_level(MsPower::Ms1.ms_level())
+            .with_ms_level(1)
             .with_polarity(Polarity::Positive)
             .with_scan_mode(ScanMode::Centroid)
             .with_analyzer(Analyzer::FTMS)
@@ -62,7 +62,7 @@ impl SampleSource {
             .with_peaks(vec![100.0, 200.0, 300.0], vec![1.0, 5.0, 2.0])
             .with_extra("openmassspec.sample_label", "survey");
         let ms2 = SpectrumRecord::new(1, 2, "controllerType=0 controllerNumber=1 scan=2")
-            .with_ms_level(MsPower::Ms2.ms_level())
+            .with_ms_level(2)
             .with_polarity(Polarity::Positive)
             .with_scan_mode(ScanMode::Centroid)
             .with_analyzer(Analyzer::FTMS)
@@ -96,7 +96,7 @@ impl SampleSource {
         // scalar 1/K0 plus a per-peak inverse-reduced-mobility array, which
         // the writer emits as a third binary data array.
         let ms1_mobility = SpectrumRecord::new(2, 3, "frame=1 scan=0")
-            .with_ms_level(MsPower::Ms1.ms_level())
+            .with_ms_level(1)
             .with_polarity(Polarity::Positive)
             .with_scan_mode(ScanMode::Centroid)
             .with_analyzer(Analyzer::TOFMS)

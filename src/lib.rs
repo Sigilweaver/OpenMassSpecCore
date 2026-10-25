@@ -8,7 +8,7 @@
 //!   [`SpectrumRecord`], [`PrecursorInfo`], [`ChromatogramRecord`],
 //!   [`RunMetadata`], [`CvTerm`]. All are `#[non_exhaustive]` and built with
 //!   constructors plus `with_*` setters.
-//! * Shared enums: [`Polarity`], [`ScanMode`], [`Analyzer`], [`MsPower`],
+//! * Shared enums: [`Polarity`], [`ScanMode`], [`Analyzer`],
 //!   [`Activation`], [`Compression`], [`MobilityArrayKind`].
 //! * A trait every vendor parser implements: [`SpectrumSource`]. Its
 //!   iterators yield `Result` items, so decode errors reach the consumer.
@@ -44,8 +44,8 @@ pub mod cv;
 
 pub use centroid::Centroided;
 pub use enums::{
-    Activation, Analyzer, CollisionEnergyUnit, Compression, MobilityArrayKind, MsPower,
-    ParseLabelError, Polarity, ScanMode,
+    Activation, Analyzer, CollisionEnergyUnit, Compression, MobilityArrayKind, ParseLabelError,
+    Polarity, ScanMode,
 };
 pub use error::{Error, RecordProblem, Result};
 pub use leniency::{Check, Leniency, UnknownCheck};

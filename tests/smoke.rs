@@ -3,7 +3,7 @@
 //! output contains the expected spectra.
 
 use openmassspec_core::{
-    write_indexed_mzml, write_mzml, Activation, Analyzer, CvTerm, MsPower, Polarity, PrecursorInfo,
+    write_indexed_mzml, write_mzml, Activation, Analyzer, CvTerm, Polarity, PrecursorInfo,
     RunMetadata, ScanMode, SpectrumIter, SpectrumRecord, SpectrumSource,
 };
 
@@ -25,7 +25,7 @@ impl ToySource {
         )
         .with_analyzers(vec![Analyzer::FTMS]);
         let s1 = SpectrumRecord::new(0, 1, "controllerType=0 controllerNumber=1 scan=1")
-            .with_ms_level(MsPower::Ms1.ms_level())
+            .with_ms_level(1)
             .with_polarity(Polarity::Positive)
             .with_scan_mode(ScanMode::Centroid)
             .with_analyzer(Analyzer::FTMS)
@@ -34,7 +34,7 @@ impl ToySource {
             .with_ion_injection_time_ms(20.0)
             .with_peaks(vec![100.0, 200.0, 300.0], vec![1.0, 5.0, 2.0]);
         let s2 = SpectrumRecord::new(1, 2, "controllerType=0 controllerNumber=1 scan=2")
-            .with_ms_level(MsPower::Ms2.ms_level())
+            .with_ms_level(2)
             .with_polarity(Polarity::Positive)
             .with_scan_mode(ScanMode::Centroid)
             .with_analyzer(Analyzer::FTMS)

@@ -58,30 +58,6 @@ pub enum ScanMode {
     Profile,
 }
 
-/// MSn order (MS1, MS2, ...).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum MsPower {
-    /// MS order not recorded.
-    Undefined,
-    /// MS1.
-    Ms1,
-    /// MS2.
-    Ms2,
-    /// MS3.
-    Ms3,
-    /// MS4.
-    Ms4,
-    /// MS5.
-    Ms5,
-    /// MS6.
-    Ms6,
-    /// MS7.
-    Ms7,
-    /// MS8.
-    Ms8,
-}
-
 /// Activation method used for MSn fragmentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
@@ -155,23 +131,6 @@ pub enum MobilityArrayKind {
     /// unit UO:0000028 "millisecond".
     #[serde(rename = "drift_time_ms")]
     DriftTimeMilliseconds,
-}
-
-impl MsPower {
-    /// Numeric MS level (1 for MS1, 2 for MS2, ...). Returns 1 for `Undefined`,
-    /// matching the convention used in mzML output.
-    pub fn ms_level(self) -> u32 {
-        match self {
-            Self::Undefined | Self::Ms1 => 1,
-            Self::Ms2 => 2,
-            Self::Ms3 => 3,
-            Self::Ms4 => 4,
-            Self::Ms5 => 5,
-            Self::Ms6 => 6,
-            Self::Ms7 => 7,
-            Self::Ms8 => 8,
-        }
-    }
 }
 
 impl Polarity {
