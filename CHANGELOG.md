@@ -30,8 +30,8 @@ Files that convert today can fail or read differently:
   The writer now writes the document head after it has read the spectra, so
   when a write fails, `out` holds no head and no partial `<spectrumList>`.
 - A spectrum with `scan_mode: None` is a record error
-  (`RecordProblem::UnknownScanMode`). It used to be written as
-  "profile spectrum". `WriteOptions::with_scan_mode_policy(ScanModePolicy::Omit)`
+  (`RecordProblem::UnknownScanMode`) that stops the write even under
+  `RecordErrorPolicy::Skip`. It used to be written as "profile spectrum". `WriteOptions::with_scan_mode_policy(ScanModePolicy::Omit)`
   writes it with no profile/centroid term and an
   `openmassspec: spectrum representation` userParam of `unknown`, and counts
   it in `WriteSummary::spectra_unknown_scan_mode`.

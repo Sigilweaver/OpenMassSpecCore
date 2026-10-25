@@ -488,7 +488,9 @@ pub enum RecordErrorPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum ScanModePolicy {
-    /// Treat the spectrum as a record error ([`RecordProblem::UnknownScanMode`]).
+    /// Stop with a record error ([`RecordProblem::UnknownScanMode`]), even
+    /// under [`RecordErrorPolicy::Skip`]: it describes how the run is
+    /// read, not one damaged record.
     #[default]
     Require,
     /// Write the spectrum with no profile/centroid term and a
@@ -801,6 +803,7 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
     for item in src.iter_spectra() {
         let rec = match item {
             Ok(rec) => rec,
+            Err(e) if is_run_level(&e) => return Err(e),
             Err(_) if skip => {
                 summary.spectra_skipped += 1;
                 continue;
@@ -813,7 +816,7 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
             check_spectrum_for_write(&rec, &written_ids, mobility_kind, opts.scan_mode_policy);
         let flags = match checked {
             Ok(flags) => flags,
-            Err(problem) if skip => {
+            Err(problem) if skip && problem != RecordProblem::UnknownScanMode => {
                 let _ = problem;
                 summary.spectra_skipped += 1;
                 summary.spectra_invalid += 1;
@@ -1216,6 +1219,18 @@ fn analyzer_ic_table(analyzers: &[Analyzer]) -> Vec<(Analyzer, String)> {
         .enumerate()
         .map(|(i, a)| (*a, format!("IC{}", i + 2)))
         .collect()
+}
+
+/// An error that says how the run is read rather than that one record is
+/// damaged, so skipping the record would only repeat it for every spectrum.
+fn is_run_level(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::Record {
+            problem: RecordProblem::UnknownScanMode,
+            ..
+        }
+    )
 }
 
 /// How [`write_spectrum`] must deviate from the record as given.
@@ -3129,6 +3144,19 @@ mod tests {
         rec.scan_mode = None;
         assert_eq!(
             problem_of(write_one(rec, &WriteOptions::new())),
+            RecordProblem::UnknownScanMode
+        );
+    }
+
+    #[test]
+    fn unknown_scan_mode_is_fatal_even_under_skip() {
+        // It says how the run is read, not that one record is damaged, so
+        // skipping would drop every spectrum and still report success.
+        let mut rec = two_peaks();
+        rec.scan_mode = None;
+        let opts = WriteOptions::new().with_record_error_policy(RecordErrorPolicy::Skip);
+        assert_eq!(
+            problem_of(write_one(rec, &opts)),
             RecordProblem::UnknownScanMode
         );
     }
