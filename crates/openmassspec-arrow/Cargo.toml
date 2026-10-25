@@ -1,7 +1,8 @@
 [package]
 name = "openmassspec-arrow"
 description = "Apache Arrow RecordBatch bridge for openmassspec-core spectrum records."
-version.workspace = true
+# Own version line: a new Arrow major is released here without renumbering Core.
+version = "4.0.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -16,7 +17,13 @@ readme = "README.md"
 [lints]
 workspace = true
 
+[features]
+default = ["arrow-60"]
+# Each arrow-rs major is a feature; a new one is added alongside, in a minor release.
+arrow-60 = ["dep:arrow-array-60", "dep:arrow-schema-60"]
+
 [dependencies]
 openmassspec-core = { version = "4.0.0", path = "../.." }
-arrow-array = "60"
-arrow-schema = "60"
+thiserror = "2"
+arrow-array-60 = { package = "arrow-array", version = "60", optional = true }
+arrow-schema-60 = { package = "arrow-schema", version = "60", optional = true }
