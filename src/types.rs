@@ -448,6 +448,24 @@ impl ChromatogramRecord {
     }
 }
 
+/// Whether the spectra of a run have a retention time.
+///
+/// A reader whose format has no time axis says so with
+/// [`TimeAxis::Absent`]; otherwise every spectrum must carry
+/// `retention_time_sec`, and a missing one is an error instead of a
+/// silently omitted scan start time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub enum TimeAxis {
+    /// Every spectrum has a retention time (the default).
+    #[default]
+    #[serde(rename = "retention_time")]
+    Retention,
+    /// The format has no time axis; no spectrum has a retention time.
+    #[serde(rename = "absent")]
+    Absent,
+}
+
 /// Run-level metadata.
 ///
 /// Vendors construct this once per file with [`RunMetadata::new`] and the
@@ -498,6 +516,10 @@ pub struct RunMetadata {
     /// spectra in this run. `None` is treated as the Bruker convention
     /// ([`MobilityArrayKind::InverseReducedVsPerCm2`]).
     pub mobility_array_kind: Option<MobilityArrayKind>,
+    /// Whether spectra have a retention time. Defaults to
+    /// [`TimeAxis::Retention`]: a spectrum without one is then an error.
+    #[serde(default)]
+    pub time_axis: TimeAxis,
     /// Physical mass-analyzer components this instrument has, in a stable
     /// order. Static instrument configuration, not derived from scan data -
     /// vendors already resolve `instrument` from a model lookup, so this is
@@ -543,6 +565,7 @@ impl RunMetadata {
             acquisition_software_version: None,
             start_timestamp: None,
             mobility_array_kind: None,
+            time_axis: TimeAxis::Retention,
             analyzers: Vec::new(),
             warnings: Vec::new(),
             extra: BTreeMap::new(),
@@ -671,6 +694,7 @@ setters!(RunMetadata {
     opt with_acquisition_software_version acquisition_software_version: String,
     opt with_start_timestamp start_timestamp: String,
     opt with_mobility_array_kind mobility_array_kind: MobilityArrayKind,
+    val with_time_axis time_axis: TimeAxis,
     val with_analyzers analyzers: Vec<Analyzer>,
     val with_warnings warnings: Vec<Warning>,
     val with_extra_map extra: BTreeMap<String, String>,

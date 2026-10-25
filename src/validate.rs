@@ -88,6 +88,19 @@ pub(crate) fn check_spectrum(rec: &SpectrumRecord) -> Result<(), RecordProblem> 
     Ok(())
 }
 
+/// A run with a time axis needs a retention time on every spectrum; a run
+/// without one needs none.
+pub(crate) fn check_time_axis(
+    rec: &SpectrumRecord,
+    axis: crate::TimeAxis,
+) -> Result<(), RecordProblem> {
+    match (axis, rec.retention_time_sec.is_some()) {
+        (crate::TimeAxis::Retention, false) => Err(RecordProblem::MissingRetentionTime),
+        (crate::TimeAxis::Absent, true) => Err(RecordProblem::UnexpectedRetentionTime),
+        (crate::TimeAxis::Retention, true) | (crate::TimeAxis::Absent, false) => Ok(()),
+    }
+}
+
 /// Only the array-length checks (used by the centroider, which must not
 /// index past the shorter array).
 pub(crate) fn check_array_lengths(rec: &SpectrumRecord) -> Result<(), RecordProblem> {

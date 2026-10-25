@@ -56,7 +56,7 @@ pub use mzml::{
 pub use source::{ChromatogramIter, SpectrumIter, SpectrumSource};
 pub use types::{
     ChromatogramRecord, CollisionEnergy, CvTerm, PrecursorInfo, RunMetadata, ScanWindow,
-    SpectrumRecord,
+    SpectrumRecord, TimeAxis,
 };
 pub use warning::{Warning, WarningKind};
 

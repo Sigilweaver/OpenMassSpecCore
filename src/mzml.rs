@@ -884,7 +884,13 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
         };
         // Check the whole record before writing any of it, so a rejected
         // record leaves no partial element in the spool.
-        let checked = check_spectrum_for_write(&rec, &written_ids, mobility_kind, &opts.leniency);
+        let checked = check_spectrum_for_write(
+            &rec,
+            &written_ids,
+            mobility_kind,
+            meta.time_axis,
+            &opts.leniency,
+        );
         let flags = match checked {
             Ok(flags) => flags,
             Err(problem) if skip && problem != RecordProblem::UnknownScanMode => {
@@ -1374,9 +1380,11 @@ fn check_spectrum_for_write(
     rec: &SpectrumRecord,
     written_ids: &HashSet<String>,
     mobility_kind: Option<MobilityArrayKind>,
+    time_axis: crate::TimeAxis,
     leniency: &Leniency,
 ) -> std::result::Result<WriteFlags, RecordProblem> {
     validate::check_spectrum(rec)?;
+    validate::check_time_axis(rec, time_axis)?;
     if written_ids.contains(&rec.native_id) {
         return Err(RecordProblem::DuplicateId);
     }
@@ -1953,6 +1961,7 @@ mod tests {
         /// Positions in `chroms` that are yielded as `Err` instead.
         failing_chroms: Vec<usize>,
         count_hint: CountHint,
+        time_axis: crate::TimeAxis,
     }
 
     /// What [`ToySource`] returns from `spectrum_count_hint`.
@@ -1984,6 +1993,7 @@ mod tests {
                 failing_spectra: Vec::new(),
                 failing_chroms: Vec::new(),
                 count_hint: CountHint::Len,
+                time_axis: crate::TimeAxis::Retention,
             }
         }
     }
@@ -2002,6 +2012,7 @@ mod tests {
                 software_version: "0.0.0".into(),
                 start_timestamp: self.start_timestamp.clone(),
                 mobility_array_kind: None,
+                time_axis: self.time_axis,
                 analyzers: self.analyzers.clone(),
                 warnings: Vec::new(),
                 extra: self.extra.clone(),
@@ -3650,11 +3661,31 @@ mod tests {
     }
 
     #[test]
-    fn missing_retention_time_omits_the_scan_start_time() {
+    fn missing_retention_time_is_an_error_unless_the_run_declares_no_time_axis() {
+        // A reader that forgot to set it.
         let mut rec = two_peaks();
         rec.retention_time_sec = None;
-        let (s, _) = write_one(rec, &WriteOptions::new()).unwrap();
-        assert!(!s.contains("MS:1000016"));
+        assert_eq!(
+            problem_of(write_one(rec.clone(), &WriteOptions::new())),
+            RecordProblem::MissingRetentionTime
+        );
+        // A reader that says it has no time axis.
+        let mut src = ToySource::new();
+        src.time_axis = crate::TimeAxis::Absent;
+        src.spectra = vec![rec];
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        assert!(!String::from_utf8(buf).unwrap().contains("MS:1000016"));
+        // ... and then a spectrum with a time is the inconsistency.
+        src.spectra = vec![two_peaks()];
+        let err = write_mzml(&mut src, &mut Vec::new()).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Record {
+                problem: RecordProblem::UnexpectedRetentionTime,
+                ..
+            }
+        ));
         let (s, _) = write_one(two_peaks(), &WriteOptions::new()).unwrap();
         assert!(s.contains("MS:1000016"));
     }

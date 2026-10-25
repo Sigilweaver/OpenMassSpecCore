@@ -221,10 +221,14 @@ fn rt_stream_key(native_id: &str) -> String {
 pub fn assert_source_invariants<S: SpectrumSource + ?Sized>(
     src: &mut S,
 ) -> Result<usize, ConformanceError> {
+    // The run's declared time axis decides whether retention time is
+    // expected on every spectrum or on none.
+    let expects_rt = matches!(src.run_metadata().time_axis, crate::TimeAxis::Retention);
     check_stream(
         src.iter_spectra().enumerate().map(|(position, item)| {
             item.map_err(|error| ConformanceError::Source { position, error })
         }),
+        Some(expects_rt),
     )
 }
 
@@ -233,11 +237,13 @@ pub fn assert_source_invariants<S: SpectrumSource + ?Sized>(
 pub fn assert_iter_invariants<I: IntoIterator<Item = SpectrumRecord>>(
     iter: I,
 ) -> Result<usize, ConformanceError> {
-    check_stream(iter.into_iter().map(Ok))
+    // No run metadata here: the first spectrum decides, the rest must agree.
+    check_stream(iter.into_iter().map(Ok), None)
 }
 
 fn check_stream(
     iter: impl Iterator<Item = Result<SpectrumRecord, ConformanceError>>,
+    mut expects_rt: Option<bool>,
 ) -> Result<usize, ConformanceError> {
     let mut last_index: Option<usize> = None;
     let mut last_rt: HashMap<String, f64> = HashMap::new();
@@ -248,6 +254,19 @@ fn check_stream(
         if !seen_ids.insert(spectrum.native_id.clone()) {
             return Err(ConformanceError::DuplicateNativeId {
                 native_id: spectrum.native_id.clone(),
+            });
+        }
+        // Retention time is present on every spectrum or on none.
+        let has_rt = spectrum.retention_time_sec.is_some();
+        let expected = *expects_rt.get_or_insert(has_rt);
+        if has_rt != expected {
+            return Err(ConformanceError::InvalidRecord {
+                native_id: spectrum.native_id.clone(),
+                problem: if expected {
+                    crate::RecordProblem::MissingRetentionTime
+                } else {
+                    crate::RecordProblem::UnexpectedRetentionTime
+                },
             });
         }
         check_one(&spectrum, last_index, &mut last_rt)?;
@@ -537,5 +556,36 @@ mod tests {
             matches!(err, ConformanceError::BasePeakIntensityMismatch { .. }),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn retention_time_is_on_every_spectrum_or_none() {
+        // A reader that forgot to set it on one spectrum.
+        let mut forgot = vec![ok_spec(0, 1, 1.0), ok_spec(1, 1, 2.0)];
+        forgot[1].retention_time_sec = None;
+        let err = assert_source_invariants(&mut ToySource(forgot.clone(), None)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConformanceError::InvalidRecord {
+                    problem: crate::RecordProblem::MissingRetentionTime,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        // ... or on all of them: a run that declares a time axis fails.
+        let mut none = vec![ok_spec(0, 1, 1.0), ok_spec(1, 1, 2.0)];
+        for s in &mut none {
+            s.retention_time_sec = None;
+        }
+        let err = assert_source_invariants(&mut ToySource(none.clone(), None)).unwrap_err();
+        assert!(
+            matches!(err, ConformanceError::InvalidRecord { .. }),
+            "{err:?}"
+        );
+        // Without run metadata the first spectrum decides: all-absent passes.
+        assert_eq!(assert_iter_invariants(none).unwrap(), 2);
+        assert!(assert_iter_invariants(forgot).is_err());
     }
 }

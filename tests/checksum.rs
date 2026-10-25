@@ -102,6 +102,7 @@ impl OneSpectrumSource {
                 "0.0.0",
             ),
             spectrum: SpectrumRecord::new(0, 1, "controllerType=0 controllerNumber=1 scan=1")
+                .with_retention_time_sec(1.0)
                 .with_polarity(Polarity::Positive)
                 .with_scan_mode(ScanMode::Centroid)
                 .with_peaks(vec![100.0, 200.0, 300.0], vec![10.0, 5.0, 1.0]),

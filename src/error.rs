@@ -153,6 +153,12 @@ pub enum RecordProblem {
         /// The unit's label.
         unit: &'static str,
     },
+    /// The run has a time axis but this spectrum has no retention time.
+    #[error("retention time is missing (the run declares a time axis)")]
+    MissingRetentionTime,
+    /// The run declares no time axis but this spectrum has a retention time.
+    #[error("retention time present although the run declares no time axis")]
+    UnexpectedRetentionTime,
     /// `ms_level` is 0; MS levels start at 1.
     #[error("ms_level is 0 (levels start at 1)")]
     MsLevelZero,

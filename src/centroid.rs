@@ -272,6 +272,7 @@ mod tests {
                     acquisition_software_version: None,
                     start_timestamp: None,
                     mobility_array_kind: None,
+                    time_axis: crate::TimeAxis::Retention,
                     analyzers: Vec::new(),
                     warnings: Vec::new(),
                     extra: Default::default(),

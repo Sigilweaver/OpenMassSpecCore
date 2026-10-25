@@ -320,6 +320,7 @@ impl SpectrumSource for EveryPath {
                 out.push(
                     SpectrumRecord::new(n, n as u32 + 1, format!("scan={}", n + 1))
                         .with_ms_level(2)
+                        .with_retention_time_sec(n as f64)
                         .with_polarity(Polarity::Positive)
                         .with_scan_mode(ScanMode::Centroid)
                         .with_analyzer(analyzer)
