@@ -10,15 +10,39 @@
 
 use crate::cv;
 use crate::enums::ScanMode;
+use crate::error::{Error, RecordProblem, Result};
+use crate::leniency::{Check, Leniency};
 use crate::source::{ChromatogramIter, SpectrumIter, SpectrumSource};
 use crate::types::{CvTerm, RunMetadata, SpectrumRecord};
+use crate::validate;
+use crate::warning::{Warning, WarningKind};
 
-/// Wraps a [`SpectrumSource`], centroiding every profile-mode spectrum it
-/// yields. Spectra already tagged [`ScanMode::Centroid`] pass through
-/// unchanged (idempotent).
+/// Relative median m/z spacing above which a spectrum labelled profile is
+/// taken to be a peak list (0.5 percent of m/z, i.e. 5000 ppm). Profile
+/// sampling is far finer than that on every analyzer family (Orbitrap and
+/// TOF are tens of ppm; low-resolution ion-trap steps are hundreds).
+const PEAK_LIST_RELATIVE_SPACING: f64 = 0.005;
+
+/// A neighbour joins a peak only if it is within this many median spacings.
+const NEIGHBOR_SPACING_FACTOR: f64 = 3.0;
+
+/// Wraps a [`SpectrumSource`], centroiding every spectrum declared
+/// [`ScanMode::Profile`]. Spectra declared [`ScanMode::Centroid`] pass
+/// through unchanged (idempotent).
+///
+/// A spectrum with no declared scan mode is a record error
+/// ([`RecordProblem::UnknownScanMode`]) unless
+/// [`with_leniency`](Centroided::with_leniency) allows
+/// [`Check::UnknownScanMode`], which passes it through untouched with a
+/// [`WarningKind::CentroidNotApplied`] warning. A spectrum declared
+/// profile whose points are too sparse to be profile data is a record error
+/// ([`RecordProblem::NotProfile`]). Peak weighting only joins neighbours
+/// that sit within a few median sample spacings, so gaps in a
+/// zero-stripped profile are never averaged across.
 pub struct Centroided<S: SpectrumSource> {
     inner: S,
     min_intensity: f32,
+    leniency: Leniency,
 }
 
 impl<S: SpectrumSource> Centroided<S> {
@@ -27,12 +51,19 @@ impl<S: SpectrumSource> Centroided<S> {
         Self {
             inner,
             min_intensity: 0.0,
+            leniency: Leniency::strict(),
         }
     }
 
     /// Discard picked peaks below `min_intensity` (a simple noise floor).
     pub fn with_min_intensity(mut self, min_intensity: f32) -> Self {
         self.min_intensity = min_intensity;
+        self
+    }
+
+    /// Checks that may continue with a warning instead of failing.
+    pub fn with_leniency(mut self, leniency: Leniency) -> Self {
+        self.leniency = leniency;
         self
     }
 }
@@ -45,10 +76,11 @@ impl<S: SpectrumSource> SpectrumSource for Centroided<S> {
     /// Errors from the wrapped source pass through unchanged.
     fn iter_spectra<'a>(&'a mut self) -> SpectrumIter<'a> {
         let min_intensity = self.min_intensity;
+        let leniency = self.leniency.clone();
         Box::new(
             self.inner
                 .iter_spectra()
-                .map(move |rec| rec.map(|rec| centroid_record(rec, min_intensity))),
+                .map(move |rec| rec.and_then(|rec| centroid_record(rec, min_intensity, &leniency))),
         )
     }
 
@@ -67,9 +99,46 @@ impl<S: SpectrumSource> SpectrumSource for Centroided<S> {
     }
 }
 
-fn centroid_record(mut rec: SpectrumRecord, min_intensity: f32) -> SpectrumRecord {
-    if rec.scan_mode == Some(ScanMode::Centroid) {
-        return rec;
+fn record_error(rec: &SpectrumRecord, problem: RecordProblem) -> Error {
+    Error::Record {
+        record_id: rec.native_id.clone(),
+        problem,
+    }
+}
+
+fn centroid_record(
+    mut rec: SpectrumRecord,
+    min_intensity: f32,
+    leniency: &Leniency,
+) -> Result<SpectrumRecord> {
+    match rec.scan_mode {
+        Some(ScanMode::Centroid) => return Ok(rec),
+        Some(ScanMode::Profile) => {}
+        _ => {
+            if !leniency.allows(&Check::UnknownScanMode) {
+                return Err(record_error(&rec, RecordProblem::UnknownScanMode));
+            }
+            rec.warnings.push(Warning::new(
+                WarningKind::CentroidNotApplied,
+                "scan mode unknown: left as read, not centroided",
+            ));
+            return Ok(rec);
+        }
+    }
+
+    // NaN intensities and unsorted m/z would make the peak comparisons and
+    // the spacing bound meaningless, so run the writer's checks first.
+    validate::check_spectrum(&rec).map_err(|p| record_error(&rec, p))?;
+    if let Some((spacing, relative)) = validate::median_spacing(&rec.mz) {
+        if relative > PEAK_LIST_RELATIVE_SPACING {
+            return Err(record_error(
+                &rec,
+                RecordProblem::NotProfile {
+                    median_spacing: spacing,
+                    relative_ppm: relative * 1e6,
+                },
+            ));
+        }
     }
 
     let (mz, intensity, inv_mobility_per_peak) = pick_peaks(
@@ -91,18 +160,20 @@ fn centroid_record(mut rec: SpectrumRecord, min_intensity: f32) -> SpectrumRecor
     rec.base_peak_intensity = None;
     rec.low_mz = None;
     rec.high_mz = None;
-    rec
+    Ok(rec)
 }
 
-/// Local-maxima peak picking: a point is a picked peak if it is no smaller
-/// than both neighbors and strictly larger than at least one of them (this
-/// also correctly picks a single-point spectrum, `n == 1`, since the "beats
-/// a neighbor" check is vacuously satisfied). The picked m/z (and, when
-/// present, inverse mobility) is the intensity-weighted centroid over the
-/// apex and its immediate neighbors; the picked intensity is the apex
-/// height. This is intentionally simple - see `timsrust-centroid` /
-/// `pyteomics` for more sophisticated peer approaches if this ever needs to
-/// improve on plain local-maxima picking.
+/// Local-maxima peak picking over contiguous runs of samples. A neighbour
+/// counts only if it is within `NEIGHBOR_SPACING_FACTOR` median spacings; a
+/// farther one is a gap in a zero-stripped profile and is treated as absent.
+/// A point is a picked peak if it is no smaller than both counted neighbors
+/// and strictly larger than at least one of them (a point with no counted
+/// neighbor is a peak on its own). The picked m/z (and, when present,
+/// inverse mobility) is the intensity-weighted centroid over the apex and
+/// its counted neighbors; the picked intensity is the apex height. This is
+/// intentionally simple - see `timsrust-centroid` / `pyteomics` for more
+/// sophisticated peer approaches if this ever needs to improve on plain
+/// local-maxima picking.
 fn pick_peaks(
     mz: &[f64],
     intensity: &[f32],
@@ -114,12 +185,24 @@ fn pick_peaks(
     let mut out_intensity = Vec::new();
     let mut out_im = inv_mobility_per_peak.map(|_| Vec::new());
 
+    let gap_bound = match validate::median_spacing(mz) {
+        Some((spacing, _)) if spacing > 0.0 => spacing * NEIGHBOR_SPACING_FACTOR,
+        _ => {
+            let mid = mz.get(n / 2).copied().unwrap_or(0.0);
+            mid.abs() * PEAK_LIST_RELATIVE_SPACING
+        }
+    };
+    let has_left = |i: usize| i > 0 && mz[i] - mz[i - 1] <= gap_bound;
+    let has_right = |i: usize| i + 1 < n && mz[i + 1] - mz[i] <= gap_bound;
+
     for i in 0..n {
-        let no_smaller_than_left = i == 0 || intensity[i] >= intensity[i - 1];
-        let no_smaller_than_right = i == n - 1 || intensity[i] >= intensity[i + 1];
-        let beats_a_neighbor = n == 1
-            || (i > 0 && intensity[i] > intensity[i - 1])
-            || (i < n - 1 && intensity[i] > intensity[i + 1]);
+        let left = has_left(i);
+        let right = has_right(i);
+        let no_smaller_than_left = !left || intensity[i] >= intensity[i - 1];
+        let no_smaller_than_right = !right || intensity[i] >= intensity[i + 1];
+        let beats_a_neighbor = (!left && !right)
+            || (left && intensity[i] > intensity[i - 1])
+            || (right && intensity[i] > intensity[i + 1]);
         if !(no_smaller_than_left && no_smaller_than_right && beats_a_neighbor) {
             continue;
         }
@@ -127,8 +210,8 @@ fn pick_peaks(
             continue;
         }
 
-        let lo = i.saturating_sub(1);
-        let hi = (i + 1).min(n - 1);
+        let lo = if left { i - 1 } else { i };
+        let hi = if right { i + 1 } else { i };
         let mut weighted_mz = 0.0f64;
         let mut weighted_im = 0.0f64;
         let mut weight_sum = 0.0f64;
@@ -165,7 +248,7 @@ fn pick_peaks(
 mod tests {
     use super::*;
     use crate::conformance::assert_source_invariants;
-    use crate::{MsPower, Polarity};
+    use crate::Polarity;
 
     struct OneSpectrumSource {
         meta: RunMetadata,
@@ -189,7 +272,9 @@ mod tests {
                     acquisition_software_version: None,
                     start_timestamp: None,
                     mobility_array_kind: None,
+                    time_axis: crate::TimeAxis::Retention,
                     analyzers: Vec::new(),
+                    warnings: Vec::new(),
                     extra: Default::default(),
                 },
                 rec: Some(rec),
@@ -231,18 +316,20 @@ mod tests {
             index: 0,
             scan_number: 1,
             native_id: "scan=1".into(),
-            ms_level: MsPower::Ms1.ms_level(),
+            ms_level: 1,
             polarity: Some(Polarity::Positive),
             scan_mode: Some(ScanMode::Profile),
             analyzer: None,
             acquisition_event_id: None,
             filter: None,
-            retention_time_sec: 1.0,
+            retention_time_sec: Some(1.0),
             total_ion_current: Some(intensity.iter().map(|&v| v as f64).sum()),
             base_peak_mz: Some(100.0),
             base_peak_intensity: Some(100.0),
             low_mz: Some(99.0),
             high_mz: Some(201.0),
+            scan_windows: Vec::new(),
+            removed_scan_window: None,
             ion_injection_time_ms: None,
             inv_mobility: None,
             faims_cv: None,
@@ -250,6 +337,7 @@ mod tests {
             mz,
             intensity,
             inv_mobility_per_peak: None,
+            warnings: Vec::new(),
             extra: Default::default(),
         }
     }
@@ -363,5 +451,109 @@ mod tests {
         );
         let err = results[1].as_ref().unwrap_err();
         assert!(err.to_string().contains("truncated scan"), "{err}");
+    }
+
+    fn centroid_one(rec: SpectrumRecord, leniency: Leniency) -> crate::Result<SpectrumRecord> {
+        let mut src = Centroided::new(OneSpectrumSource::new(rec)).with_leniency(leniency);
+        let mut out: Vec<_> = src.iter_spectra().collect();
+        out.remove(0)
+    }
+
+    fn problem(r: crate::Result<SpectrumRecord>) -> RecordProblem {
+        match r.unwrap_err() {
+            Error::Record { problem, .. } => problem,
+            other => panic!("expected Error::Record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_scan_mode_is_an_error_not_assumed_profile() {
+        let mut rec = profile_spectrum();
+        rec.scan_mode = None;
+        assert_eq!(
+            problem(centroid_one(rec, Leniency::strict())),
+            RecordProblem::UnknownScanMode
+        );
+    }
+
+    #[test]
+    fn unknown_scan_mode_passes_through_marked_when_lenient() {
+        let mut rec = profile_spectrum();
+        rec.scan_mode = None;
+        let original = rec.mz.clone();
+        let out = centroid_one(rec, Leniency::strict().with(Check::UnknownScanMode)).unwrap();
+        assert_eq!(out.mz, original);
+        assert_eq!(out.scan_mode, None);
+        assert_eq!(out.warnings.len(), 1);
+        assert_eq!(out.warnings[0].kind, WarningKind::CentroidNotApplied);
+    }
+
+    #[test]
+    fn sparse_peak_list_labelled_profile_is_rejected_not_reweighted() {
+        // A centroid peak list mislabelled profile: points are hundreds of
+        // m/z apart, so local-maximum weighting would move every peak.
+        let mut rec = profile_spectrum();
+        rec.mz = vec![150.0, 480.0, 910.0, 1500.0, 2400.0, 3100.0];
+        rec.intensity = vec![5.0, 90.0, 20.0, 60.0, 10.0, 40.0];
+        let p = problem(centroid_one(rec, Leniency::strict()));
+        assert!(matches!(p, RecordProblem::NotProfile { .. }), "{p:?}");
+    }
+
+    #[test]
+    fn gaps_in_a_zero_stripped_profile_are_not_averaged_across() {
+        // Two dense profile bumps with the zeros between them removed, and a
+        // lone point far from both. Each result must sit inside its own run.
+        let mut rec = profile_spectrum();
+        rec.mz = vec![
+            500.000, 500.001, 500.002, 500.003, 500.004, // bump A
+            600.000, 600.001, 600.002, 600.003, 600.004, // bump B
+            700.000, // isolated point
+        ];
+        rec.intensity = vec![1.0, 5.0, 10.0, 5.0, 1.0, 1.0, 4.0, 8.0, 4.0, 1.0, 3.0];
+        let out = centroid_one(rec, Leniency::strict()).unwrap();
+        assert_eq!(out.mz.len(), 3, "{:?}", out.mz);
+        assert!((out.mz[0] - 500.002).abs() < 0.0015);
+        assert!((out.mz[1] - 600.002).abs() < 0.0015);
+        assert_eq!(out.mz[2], 700.0);
+        assert_eq!(out.intensity, vec![10.0, 8.0, 3.0]);
+    }
+
+    #[test]
+    fn mismatched_array_lengths_are_an_error_not_truncated() {
+        let mut rec = profile_spectrum();
+        rec.intensity.push(1.0);
+        assert!(matches!(
+            problem(centroid_one(rec, Leniency::strict())),
+            RecordProblem::ArrayLengthMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn nan_intensity_and_unsorted_mz_are_errors_not_guesses() {
+        let mut nan = profile_spectrum();
+        nan.intensity[3] = f32::NAN;
+        assert!(matches!(
+            problem(centroid_one(nan, Leniency::strict())),
+            RecordProblem::NonFinite { .. }
+        ));
+        let mut unsorted = profile_spectrum();
+        unsorted.mz.swap(1, 2);
+        assert!(matches!(
+            problem(centroid_one(unsorted, Leniency::strict())),
+            RecordProblem::UnsortedMz { .. }
+        ));
+    }
+
+    #[test]
+    fn not_profile_is_skipped_and_counted_by_the_writer() {
+        let mut rec = profile_spectrum();
+        rec.mz = vec![150.0, 480.0, 910.0, 1500.0];
+        rec.intensity = vec![5.0, 90.0, 20.0, 60.0];
+        let mut src = Centroided::new(OneSpectrumSource::new(rec));
+        let opts =
+            crate::WriteOptions::new().with_record_error_policy(crate::RecordErrorPolicy::Skip);
+        let summary = crate::write_mzml_with_options(&mut src, &mut Vec::new(), &opts).unwrap();
+        assert_eq!(summary.spectra_skipped, 1);
+        assert!(summary.issues[0].cause.contains("peak list"));
     }
 }

@@ -17,6 +17,6 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
-openmassspec-core = { version = "3.0.0", path = "../.." }
+openmassspec-core = { version = "4.0.0", path = "../.." }
 arrow-array = "60"
 arrow-schema = "60"

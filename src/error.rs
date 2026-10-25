@@ -7,6 +7,7 @@
 //! `Result<_, Error>` items, and vendor errors travel inside
 //! [`Error::Vendor`].
 
+use std::borrow::Cow;
 use std::io;
 
 /// Stack-wide error type.
@@ -25,21 +26,176 @@ pub enum Error {
     /// type, preserved via `Box<dyn std::error::Error>` so callers can
     /// downcast if they need vendor-specific context.
     #[error("vendor parser error: {0}")]
-    Vendor(Box<dyn std::error::Error + Send + Sync + 'static>),
+    Vendor(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
 
-    /// Format detection failed or the input does not match a supported vendor.
-    #[error("unsupported or unrecognized format: {0}")]
-    Format(String),
+    /// The source announced more spectra than were written or skipped, and
+    /// reported no error for the difference. Allow it with
+    /// `Check::SpectrumCountShortfall`.
+    #[error(
+        "the source announced {announced} spectra but only {accounted} were written or skipped"
+    )]
+    #[non_exhaustive]
+    SpectrumCountShortfall {
+        /// The source's `spectrum_count_hint`.
+        announced: usize,
+        /// Spectra written plus spectra skipped.
+        accounted: usize,
+    },
 
-    /// Conformance harness rejected a record stream.
-    #[error("conformance violation: {0}")]
-    Conformance(String),
+    /// A spectrum or chromatogram record failed the writer's checks. The
+    /// record is identified by its native id (or chromatogram id).
+    #[error("invalid record {record_id:?}: {problem}")]
+    #[non_exhaustive]
+    Record {
+        /// `native_id` of the spectrum, or `id` of the chromatogram.
+        record_id: String,
+        /// What was wrong.
+        problem: RecordProblem,
+    },
+}
+
+/// What is wrong with a record rejected by the mzML writer or the
+/// centroider (see [`Error::Record`]).
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum RecordProblem {
+    /// Two parallel arrays have different lengths.
+    #[error("{array} array has {found} values, expected {expected} (length of {reference})")]
+    #[non_exhaustive]
+    ArrayLengthMismatch {
+        /// The array whose length is wrong.
+        array: &'static str,
+        /// The array it must match.
+        reference: &'static str,
+        /// Required length.
+        expected: usize,
+        /// Length found.
+        found: usize,
+    },
+    /// A float field or array value is NaN or infinite.
+    #[error("{field} is not finite ({value})")]
+    #[non_exhaustive]
+    NonFinite {
+        /// Field name, with `[i]` for an array element.
+        field: String,
+        /// The offending value.
+        value: f64,
+    },
+    /// The m/z array is not in ascending order.
+    #[error("m/z array is not ascending at index {index} ({previous} then {value})")]
+    #[non_exhaustive]
+    UnsortedMz {
+        /// Index of the first value that is smaller than its predecessor.
+        index: usize,
+        /// Value at `index - 1`.
+        previous: f64,
+        /// Value at `index`.
+        value: f64,
+    },
+    /// The native id was already written for an earlier record.
+    #[error("native id already used by an earlier record")]
+    DuplicateId,
+    /// A scan window is reversed or has a negative lower limit.
+    #[error("scan window {index} is invalid: {lower} to {upper} (need 0 <= lower <= upper)")]
+    #[non_exhaustive]
+    InvalidScanWindow {
+        /// Index into `scan_windows`.
+        index: usize,
+        /// Lower limit.
+        lower: f64,
+        /// Upper limit.
+        upper: f64,
+    },
+    /// A precursor `spectrumRef` names a spectrum that is not in the output.
+    #[error("precursor references spectrum {reference:?}, which is not in the output")]
+    #[non_exhaustive]
+    DanglingPrecursorRef {
+        /// The referenced native id.
+        reference: String,
+    },
+    /// The reader did not say whether the spectrum is profile or centroid.
+    #[error("scan mode is unknown (neither profile nor centroid was declared)")]
+    UnknownScanMode,
+    /// A spectrum labelled profile is a sparse peak list, not profile data.
+    #[error(
+        "labelled profile but looks like a peak list \
+         (median m/z spacing {median_spacing:.4} is {relative_ppm:.0} ppm of the m/z)"
+    )]
+    #[non_exhaustive]
+    NotProfile {
+        /// Median distance between consecutive m/z values.
+        median_spacing: f64,
+        /// That distance relative to the median m/z, in parts per million.
+        relative_ppm: f64,
+    },
+    /// A collision energy is present but its unit is not known.
+    #[error("collision energy is set but its unit (eV or NCE) is not known")]
+    CollisionEnergyUnitUnknown,
+    /// Charge, intensity or CCS is set but the selected-ion m/z is not.
+    #[error("precursor has {field} but no selected-ion m/z")]
+    #[non_exhaustive]
+    PrecursorWithoutSelectedMz {
+        /// Which field is set.
+        field: &'static str,
+    },
+    /// The spectrum has a scan-level mobility but the run's mobility array
+    /// kind is not 1/K0; the writer has no scan-level drift-time term.
+    #[error("spectrum-level inv_mobility needs mobility_array_kind inverse_reduced_k0, run declares {array_kind}")]
+    #[non_exhaustive]
+    ScanMobilityKindUnsupported {
+        /// The run's declared kind (`as_str`).
+        array_kind: &'static str,
+    },
+    /// A collision-energy unit the writer has no term for.
+    #[error("collision energy unit {unit:?} has no mzML term in this writer")]
+    #[non_exhaustive]
+    CollisionEnergyUnitUnsupported {
+        /// The unit's label.
+        unit: &'static str,
+    },
+    /// The run has a time axis but this spectrum has no retention time.
+    #[error("retention time is missing (the run declares a time axis)")]
+    MissingRetentionTime,
+    /// The run declares no time axis but this spectrum has a retention time.
+    #[error("retention time present although the run declares no time axis")]
+    UnexpectedRetentionTime,
+    /// `ms_level` is 0; MS levels start at 1.
+    #[error("ms_level is 0 (levels start at 1)")]
+    MsLevelZero,
+    /// A problem reported by a reader crate or a newer Core, identified by a
+    /// namespaced code.
+    #[error("{code}: {message}")]
+    #[non_exhaustive]
+    Other {
+        /// Namespaced code (`"opentimstdf.mobility_range"`).
+        code: Cow<'static, str>,
+        /// Human-readable detail.
+        message: String,
+    },
+}
+
+impl RecordProblem {
+    /// A reader-defined problem with a namespaced `code`.
+    pub fn other(code: impl Into<Cow<'static, str>>, message: impl Into<String>) -> Self {
+        Self::Other {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
 }
 
 /// Convenience alias.
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
+    /// A record error for the record `record_id`.
+    pub fn record(record_id: impl Into<String>, problem: RecordProblem) -> Self {
+        Error::Record {
+            record_id: record_id.into(),
+            problem,
+        }
+    }
+
     /// Wrap a vendor-crate error into [`Error::Vendor`].
     ///
     /// Usable directly as a `map_err` argument:

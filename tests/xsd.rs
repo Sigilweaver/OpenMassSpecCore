@@ -66,8 +66,10 @@ impl Source {
                     Some(
                         PrecursorInfo::default()
                             .with_selected_mz(150.0)
-                            .with_collision_energy(30.0)
-                            .with_ce_is_nce(true),
+                            .with_collision_energy(
+                                30.0,
+                                openmassspec_core::CollisionEnergyUnit::Nce,
+                            ),
                     ),
                 ),
             ],
@@ -97,10 +99,10 @@ impl SpectrumSource for Source {
     fn iter_spectra<'a>(&'a mut self) -> SpectrumIter<'a> {
         let error = self
             .with_error
-            .then(|| Err(Error::Format("corrupt scan".into())));
+            .then(|| Err(Error::vendor(std::io::Error::other("corrupt scan"))));
         let trailing = self
             .with_more_errors
-            .then(|| Err(Error::Format("corrupt last scan".into())));
+            .then(|| Err(Error::vendor(std::io::Error::other("corrupt last scan"))));
         let mut spectra = self.spectra.iter().cloned().map(Ok);
         let first = spectra.next();
         Box::new(
@@ -114,7 +116,7 @@ impl SpectrumSource for Source {
     fn iter_chromatograms<'a>(&'a mut self) -> ChromatogramIter<'a> {
         let error = self
             .with_more_errors
-            .then(|| Err(Error::Format("corrupt chromatogram".into())));
+            .then(|| Err(Error::vendor(std::io::Error::other("corrupt chromatogram"))));
         Box::new(
             error
                 .into_iter()

@@ -6,6 +6,125 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### API breaks
+
+Each is its own commit.
+
+- `Check` is open: `Check::Other(code)` and `Check::other(code)` let a
+  reader define a lenient check without a Core release. `Check` is no longer
+  `Copy`, and `Leniency::allows` takes `&Check`.
+- `SpectrumRecord::scan_window` is replaced by `scan_windows:
+  Vec<ScanWindow>` (`ScanWindow` is a `#[non_exhaustive]` struct);
+  `with_scan_window(lower, upper)` appends.
+- Collision energy is a list: `PrecursorInfo::collision_energies:
+  Vec<CollisionEnergy>`, each with its own `Option<CollisionEnergyUnit>`
+  (`None` = unknown). `collision_energy`, `ce_is_nce` and `with_ce_is_nce`
+  are removed; `with_collision_energy(value, unit)` appends and has no
+  default unit. Serde writes the `as_str` labels of `Polarity`, `ScanMode`,
+  `Analyzer`, `Activation`, `MobilityArrayKind` and `CollisionEnergyUnit`
+  (`"positive"`, `"tof"`, ...), not the Rust variant names; each has
+  `FromStr`.
+- `SpectrumRecord::retention_time_sec` is `Option<f64>`;
+  `with_retention_time_sec` still takes an `f64`.
+- `ScanWindow`, `CollisionEnergy` and `CountMismatch` are not `Copy`.
+- `MsPower` is removed.
+- `Error::Format` and `Error::Conformance` are removed; `Error::Vendor`
+  exposes its source. `RecordProblem::Unsupported` is replaced by typed
+  variants. `Error::Record` and the struct variants of `RecordProblem` are
+  `#[non_exhaustive]`.
+- `SpectrumIter` and `ChromatogramIter` are `Send`.
+- `WriteSummary` is not `Copy` or `Eq`, `WriteOptions` is not `Eq`, and
+  `WriteSummary::spectrum_count_mismatch` is `Option<CountMismatch>`.
+- `openmassspec_arrow::SpectrumBatchBuilder::push` returns a typed
+  `Result` (see the Arrow entries below).
+
+### Behavior changes
+
+Files that convert today can fail or read differently:
+
+- The mzML writer checks every spectrum and chromatogram before writing it
+  and returns `Error::Record { record_id, problem }` for: `intensity` or
+  `inv_mobility_per_peak` not the length of `mz` (the mobility array used to
+  be dropped silently); NaN or infinite values in any float field, array,
+  precursor field or scan window; an `mz` array that is not ascending; a scan
+  window with a negative lower limit or lower > upper; `ms_level` 0; a native
+  id (or chromatogram id) already written; a precursor with charge,
+  intensity or CCS but no selected-ion m/z; a collision energy with no unit;
+  a precursor `spectrumRef` naming a spectrum that is not in the output;
+  and spectrum-level `inv_mobility` when `mobility_array_kind` is
+  `DriftTimeMilliseconds`. With `RecordErrorPolicy::Skip` a rejected record
+  is left out, counted in `WriteSummary::spectra_skipped` and
+  `spectra_invalid` (`chromatograms_invalid`), and its cause is kept in
+  `WriteSummary::issues` (at most `WriteOptions::max_reported_issues`, with
+  the typed `WriteIssue::problem`).
+- A source that announces more spectra than it yields, with no error for the
+  difference, is `Error::SpectrumCountShortfall` unless
+  `Check::SpectrumCountShortfall` is allowed (then `RunMetadata`-level
+  warning and `WriteSummary::spectrum_count_mismatch`).
+- A spectrum whose `analyzer` is missing from `RunMetadata::analyzers` gets
+  its own `instrumentConfiguration` (it used to get none and inherit `IC1`).
+  The writer now writes the document head after it has read the spectra, so
+  when a write fails, `out` holds no head and no partial `<spectrumList>`.
+  `<fileContent>` declares only the spectrum kinds written.
+- A spectrum with no `retention_time_sec` is `RecordProblem::MissingRetentionTime`
+  unless the run declares `RunMetadata::time_axis = TimeAxis::Absent`
+  (then a spectrum that has one is `UnexpectedRetentionTime`). The
+  conformance harness requires it on every spectrum of a stream or on none.
+- JSON written by Core 3 is rejected with a message naming the replacement
+  when it carries `scan_window` (non-null), `collision_energy` or
+  `ce_is_nce`; it used to be read with those fields silently dropped.
+  Python layers that round-trip record dicts must convert them.
+- A spectrum with `scan_mode: None` is a record error
+  (`RecordProblem::UnknownScanMode`) that stops the write even under
+  `RecordErrorPolicy::Skip`. It used to be written as "profile spectrum".
+- `Centroided` picks peaks only from spectra declared `ScanMode::Profile`,
+  runs the full record validation first (NaN, unsorted m/z), and rejects a
+  "profile" spectrum whose median m/z spacing exceeds 0.5 percent of m/z
+  (`RecordProblem::NotProfile`). `scan_mode: None` is a record error. Peak
+  weighting joins neighbours only within three median sample spacings, so
+  gaps in zero-stripped profile data are no longer averaged across.
+- `Activation::CID` is always written as collision-induced dissociation
+  (MS:1000133). It used to become beam-type CID (MS:1000422) when the
+  analyzer was FTMS; readers that know a scan is beam-type send
+  `Activation::HCD`.
+- `<scanWindowList>` is written only from `SpectrumRecord::scan_windows`. It
+  used to carry the observed m/z range, which is not the instrument scan
+  window.
+- Empty spectra omit the base-peak and observed-m/z-range terms instead of
+  writing 0. A spectrum with no `retention_time_sec` has no scan start time.
+- Precursors with `Activation::PD` or no activation carry an
+  `openmassspec: activation` userParam (`pd` or `unknown`) in
+  `<activation>`. Stepped collision energies are all written.
+- `SpectrumRecord::effective_base_peak` reports a NaN intensity instead of
+  ignoring it when it is the first value.
+- The conformance harness also rejects invalid records
+  (`ConformanceError::InvalidRecord`), duplicate native ids
+  (`DuplicateNativeId`), and a declared base peak on an empty spectrum.
+
+### Added
+
+- `SpectrumRecord::validate` and `ChromatogramRecord::validate` (the same
+  checks the writer runs), `Error::record`, `RecordProblem::Other { code,
+  message }` and `RecordProblem::other`, so readers and the Arrow bridge
+  report problems through Core's error.
+- `Warning` and `WarningKind` (with `Other(code)` for reader-defined kinds),
+  and a `warnings` field on `SpectrumRecord`, `ChromatogramRecord` and
+  `RunMetadata` (`with_warnings`, `with_warning`). The writer emits each as
+  `<userParam name="openmassspec: warning CODE" value="MESSAGE"/>` and
+  counts them per code in `WriteSummary::warning_counts`.
+- `Leniency` and `Check` (`UnknownScanMode`, `DanglingPrecursorRef`,
+  `UnknownCollisionEnergyUnit`, `SpectrumCountShortfall`):
+  `WriteOptions::with_leniency` and `Centroided::with_leniency` let the named
+  checks continue instead of failing. Each affected record gets a `Warning`.
+  Built-in check names (`as_str`, `FromStr`) are what command lines and
+  Python keywords accept.
+- `WriteSummary::issues`, `issues_truncated`, `warning_counts`,
+  `spectra_invalid`, `chromatograms_invalid`, `has_warnings`;
+  `WriteOptions::max_reported_issues`; `RecordKind`, `WriteIssue`.
+- `ScanWindow`, `CollisionEnergy`, `CollisionEnergyUnit`, `ParseLabelError`,
+  `TimeAxis` and `RunMetadata::time_axis`. `Check::other` maps a built-in
+  code to the built-in variant; `Leniency::all()` covers built-in checks only.
+
 ## [3.0.0] - 2026-10-11
 
 This release is intended to be the last breaking release of the core API:

@@ -102,6 +102,16 @@ pub enum ConformanceError {
     /// Spectrum had no peaks at all.
     #[non_exhaustive]
     EmptySpectrum { native_id: String },
+    /// The record fails [`SpectrumRecord::validate`] (non-finite values,
+    /// unsorted m/z, invalid scan windows, ...).
+    #[non_exhaustive]
+    InvalidRecord {
+        native_id: String,
+        problem: crate::RecordProblem,
+    },
+    /// Two spectra share a native id.
+    #[non_exhaustive]
+    DuplicateNativeId { native_id: String },
 }
 
 impl std::fmt::Display for ConformanceError {
@@ -166,6 +176,10 @@ impl std::fmt::Display for ConformanceError {
                 "{native_id}: index sequence broken (prev={previous:?}, current={current})"
             ),
             Self::EmptySpectrum { native_id } => write!(f, "{native_id}: empty spectrum"),
+            Self::InvalidRecord { native_id, problem } => write!(f, "{native_id}: {problem}"),
+            Self::DuplicateNativeId { native_id } => {
+                write!(f, "{native_id}: native id used by more than one spectrum")
+            }
         }
     }
 }
@@ -207,10 +221,14 @@ fn rt_stream_key(native_id: &str) -> String {
 pub fn assert_source_invariants<S: SpectrumSource + ?Sized>(
     src: &mut S,
 ) -> Result<usize, ConformanceError> {
+    // The run's declared time axis decides whether retention time is
+    // expected on every spectrum or on none.
+    let expects_rt = matches!(src.run_metadata().time_axis, crate::TimeAxis::Retention);
     check_stream(
         src.iter_spectra().enumerate().map(|(position, item)| {
             item.map_err(|error| ConformanceError::Source { position, error })
         }),
+        Some(expects_rt),
     )
 }
 
@@ -219,17 +237,38 @@ pub fn assert_source_invariants<S: SpectrumSource + ?Sized>(
 pub fn assert_iter_invariants<I: IntoIterator<Item = SpectrumRecord>>(
     iter: I,
 ) -> Result<usize, ConformanceError> {
-    check_stream(iter.into_iter().map(Ok))
+    // No run metadata here: the first spectrum decides, the rest must agree.
+    check_stream(iter.into_iter().map(Ok), None)
 }
 
 fn check_stream(
     iter: impl Iterator<Item = Result<SpectrumRecord, ConformanceError>>,
+    mut expects_rt: Option<bool>,
 ) -> Result<usize, ConformanceError> {
     let mut last_index: Option<usize> = None;
     let mut last_rt: HashMap<String, f64> = HashMap::new();
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut count = 0usize;
     for spectrum in iter {
         let spectrum = spectrum?;
+        if !seen_ids.insert(spectrum.native_id.clone()) {
+            return Err(ConformanceError::DuplicateNativeId {
+                native_id: spectrum.native_id.clone(),
+            });
+        }
+        // Retention time is present on every spectrum or on none.
+        let has_rt = spectrum.retention_time_sec.is_some();
+        let expected = *expects_rt.get_or_insert(has_rt);
+        if has_rt != expected {
+            return Err(ConformanceError::InvalidRecord {
+                native_id: spectrum.native_id.clone(),
+                problem: if expected {
+                    crate::RecordProblem::MissingRetentionTime
+                } else {
+                    crate::RecordProblem::UnexpectedRetentionTime
+                },
+            });
+        }
         check_one(&spectrum, last_index, &mut last_rt)?;
         last_index = Some(spectrum.index);
         count += 1;
@@ -258,6 +297,11 @@ fn check_one(
             });
         }
     }
+    s.validate()
+        .map_err(|problem| ConformanceError::InvalidRecord {
+            native_id: s.native_id.clone(),
+            problem,
+        })?;
     if let Some(tic) = s.total_ion_current {
         let computed: f64 = s.intensity.iter().map(|&v| v as f64).sum();
         if !rel_close(tic, computed, FLOAT_REL_TOL) {
@@ -269,22 +313,22 @@ fn check_one(
         }
     }
     if let Some(bp) = s.base_peak_intensity {
-        if s.intensity.is_empty() {
-            // Nothing to compare against; trust the parser.
-            let _ = bp;
+        // An empty spectrum has a base peak of 0; a declared peak there
+        // contradicts the arrays.
+        let computed = if s.intensity.is_empty() {
+            0.0
         } else {
-            let computed = s
-                .intensity
+            s.intensity
                 .iter()
                 .copied()
-                .fold(f32::NEG_INFINITY, f32::max) as f64;
-            if !rel_close(bp, computed, FLOAT_REL_TOL) {
-                return Err(ConformanceError::BasePeakIntensityMismatch {
-                    native_id: s.native_id.clone(),
-                    declared: bp,
-                    computed,
-                });
-            }
+                .fold(f32::NEG_INFINITY, f32::max) as f64
+        };
+        if !rel_close(bp, computed, FLOAT_REL_TOL) {
+            return Err(ConformanceError::BasePeakIntensityMismatch {
+                native_id: s.native_id.clone(),
+                declared: bp,
+                computed,
+            });
         }
     }
     if s.ms_level >= 2 {
@@ -321,19 +365,23 @@ fn check_one(
             }
         }
     }
+    // A source without a time axis has no order to check.
+    let Some(rt) = s.retention_time_sec else {
+        return Ok(());
+    };
     let key = rt_stream_key(&s.native_id);
     if let Some(prev) = last_rt.get(&key).copied() {
         // Allow tiny floating-point regressions (<1 us).
-        if s.retention_time_sec + 1e-6 < prev {
+        if rt + 1e-6 < prev {
             return Err(ConformanceError::RetentionTimeNonMonotonic {
                 prefix: key,
                 previous: prev,
-                current: s.retention_time_sec,
+                current: rt,
                 native_id: s.native_id.clone(),
             });
         }
     }
-    last_rt.insert(key, s.retention_time_sec);
+    last_rt.insert(key, rt);
     Ok(())
 }
 
@@ -361,7 +409,7 @@ mod tests {
             let fail_at = self.1;
             Box::new(self.0.clone().into_iter().enumerate().map(move |(i, s)| {
                 if Some(i) == fail_at {
-                    Err(crate::Error::Format("bad block".into()))
+                    Err(crate::Error::vendor(std::io::Error::other("bad block")))
                 } else {
                     Ok(s)
                 }
@@ -401,12 +449,14 @@ mod tests {
             analyzer: None,
             acquisition_event_id: None,
             filter: None,
-            retention_time_sec: rt,
+            retention_time_sec: Some(rt),
             total_ion_current: Some(30.0),
             base_peak_mz: Some(200.0),
             base_peak_intensity: Some(20.0),
             low_mz: Some(100.0),
             high_mz: Some(200.0),
+            scan_windows: Vec::new(),
+            removed_scan_window: None,
             ion_injection_time_ms: None,
             inv_mobility: None,
             faims_cv: None,
@@ -421,6 +471,7 @@ mod tests {
             mz,
             intensity,
             inv_mobility_per_peak: None,
+            warnings: Vec::new(),
             extra: Default::default(),
         }
     }
@@ -474,5 +525,68 @@ mod tests {
             err,
             ConformanceError::MobilityArrayLengthMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn detects_non_finite_unsorted_duplicate_and_phantom_base_peak() {
+        let mut nan = ok_spec(0, 1, 1.0);
+        nan.mz[0] = f64::NAN;
+        let err = assert_source_invariants(&mut ToySource(vec![nan], None)).unwrap_err();
+        assert!(
+            matches!(err, ConformanceError::InvalidRecord { .. }),
+            "{err:?}"
+        );
+
+        let mut a = ok_spec(0, 1, 1.0);
+        let mut b = ok_spec(1, 1, 2.0);
+        b.native_id = a.native_id.clone();
+        a.total_ion_current = None;
+        let err = assert_source_invariants(&mut ToySource(vec![a, b], None)).unwrap_err();
+        assert!(
+            matches!(err, ConformanceError::DuplicateNativeId { .. }),
+            "{err:?}"
+        );
+
+        let mut empty = ok_spec(0, 1, 1.0);
+        empty.mz.clear();
+        empty.intensity.clear();
+        empty.total_ion_current = None;
+        empty.base_peak_intensity = Some(50.0);
+        let err = assert_source_invariants(&mut ToySource(vec![empty], None)).unwrap_err();
+        assert!(
+            matches!(err, ConformanceError::BasePeakIntensityMismatch { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn retention_time_is_on_every_spectrum_or_none() {
+        // A reader that forgot to set it on one spectrum.
+        let mut forgot = vec![ok_spec(0, 1, 1.0), ok_spec(1, 1, 2.0)];
+        forgot[1].retention_time_sec = None;
+        let err = assert_source_invariants(&mut ToySource(forgot.clone(), None)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConformanceError::InvalidRecord {
+                    problem: crate::RecordProblem::MissingRetentionTime,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        // ... or on all of them: a run that declares a time axis fails.
+        let mut none = vec![ok_spec(0, 1, 1.0), ok_spec(1, 1, 2.0)];
+        for s in &mut none {
+            s.retention_time_sec = None;
+        }
+        let err = assert_source_invariants(&mut ToySource(none.clone(), None)).unwrap_err();
+        assert!(
+            matches!(err, ConformanceError::InvalidRecord { .. }),
+            "{err:?}"
+        );
+        // Without run metadata the first spectrum decides: all-absent passes.
+        assert_eq!(assert_iter_invariants(none).unwrap(), 2);
+        assert!(assert_iter_invariants(forgot).is_err());
     }
 }

@@ -64,7 +64,7 @@ pub fn spectrum_record_schema() -> SchemaRef {
         Field::new("scan_mode", DataType::Utf8, true),
         Field::new("analyzer", DataType::Utf8, true),
         Field::new("filter", DataType::Utf8, true),
-        Field::new("retention_time_sec", DataType::Float64, false),
+        Field::new("retention_time_sec", DataType::Float64, true),
         Field::new("total_ion_current", DataType::Float64, true),
         Field::new("base_peak_mz", DataType::Float64, true),
         Field::new("base_peak_intensity", DataType::Float64, true),
@@ -224,7 +224,8 @@ impl SpectrumBatchBuilder {
         self.analyzer
             .append_option(rec.analyzer.map(Analyzer::as_str));
         self.filter.append_option(rec.filter.as_deref());
-        self.retention_time_sec.append_value(rec.retention_time_sec);
+        self.retention_time_sec
+            .append_option(rec.retention_time_sec);
         self.total_ion_current.append_option(rec.total_ion_current);
         self.base_peak_mz.append_option(rec.base_peak_mz);
         self.base_peak_intensity
@@ -245,8 +246,13 @@ impl SpectrumBatchBuilder {
                 self.precursor_charge.append_option(p.charge);
                 self.precursor_intensity.append_option(p.intensity);
                 self.precursor_collision_energy
-                    .append_option(p.collision_energy);
-                self.precursor_ce_is_nce.append_value(u8::from(p.ce_is_nce));
+                    .append_option(p.collision_energies.first().map(|ce| ce.value));
+                self.precursor_ce_is_nce.append_option(
+                    p.collision_energies
+                        .first()
+                        .and_then(|ce| ce.unit)
+                        .map(|u| u8::from(u == openmassspec_core::CollisionEnergyUnit::Nce)),
+                );
                 self.precursor_native_id
                     .append_option(p.precursor_native_id.as_deref());
                 self.precursor_activation

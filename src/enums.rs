@@ -15,16 +15,24 @@
 #[non_exhaustive]
 pub enum Analyzer {
     /// Ion trap.
+    #[serde(rename = "itms")]
     ITMS,
     /// Triple quadrupole.
+    #[serde(rename = "tqms")]
     TQMS,
     /// Single quadrupole.
+    #[serde(rename = "sqms")]
     SQMS,
     /// Time-of-flight.
+    #[serde(rename = "tof")]
     TOFMS,
-    /// Fourier-transform (Orbitrap, FT-ICR).
+    /// Fourier-transform (Orbitrap, FT-ICR). The mzML writer cannot tell
+    /// them apart and writes the Orbitrap term, so an FT-ICR run is labelled
+    /// Orbitrap until a variant that names the analyzer exists.
+    #[serde(rename = "ftms")]
     FTMS,
     /// Magnetic sector.
+    #[serde(rename = "sector")]
     Sector,
 }
 
@@ -33,8 +41,10 @@ pub enum Analyzer {
 #[non_exhaustive]
 pub enum Polarity {
     /// Negative ion mode.
+    #[serde(rename = "negative")]
     Negative,
     /// Positive ion mode.
+    #[serde(rename = "positive")]
     Positive,
 }
 
@@ -43,33 +53,11 @@ pub enum Polarity {
 #[non_exhaustive]
 pub enum ScanMode {
     /// Centroided peak list.
+    #[serde(rename = "centroid")]
     Centroid,
     /// Continuum (profile) signal.
+    #[serde(rename = "profile")]
     Profile,
-}
-
-/// MSn order (MS1, MS2, ...).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum MsPower {
-    /// MS order not recorded.
-    Undefined,
-    /// MS1.
-    Ms1,
-    /// MS2.
-    Ms2,
-    /// MS3.
-    Ms3,
-    /// MS4.
-    Ms4,
-    /// MS5.
-    Ms5,
-    /// MS6.
-    Ms6,
-    /// MS7.
-    Ms7,
-    /// MS8.
-    Ms8,
 }
 
 /// Activation method used for MSn fragmentation.
@@ -77,27 +65,38 @@ pub enum MsPower {
 #[non_exhaustive]
 pub enum Activation {
     /// Higher-energy collisional dissociation (Q Exactive style).
+    #[serde(rename = "hcd")]
     HCD,
     /// Multi-photon induced dissociation.
+    #[serde(rename = "mpid")]
     MPID,
     /// Electron transfer dissociation.
+    #[serde(rename = "etd")]
     ETD,
-    /// Collision-induced dissociation. On FTMS analyzers this is
-    /// conventionally rendered as beam-type CID (HCD-equivalent) in mzML.
+    /// Collision-induced dissociation (resonant). Beam-type CID is
+    /// [`Activation::HCD`]; the analyzer is not used to choose.
+    #[serde(rename = "cid")]
     CID,
     /// Electron-capture dissociation.
+    #[serde(rename = "ecd")]
     ECD,
     /// Infrared multiphoton dissociation.
+    #[serde(rename = "irmpd")]
     IRMPD,
     /// Proton-transfer / activated-ion variant.
+    #[serde(rename = "pd")]
     PD,
     /// Pulsed q dissociation.
+    #[serde(rename = "pqd")]
     PQD,
     /// Ultraviolet photodissociation.
+    #[serde(rename = "uvpd")]
     UVPD,
     /// Surface-induced dissociation.
+    #[serde(rename = "sid")]
     SID,
     /// ETD with supplemental HCD.
+    #[serde(rename = "ethcd")]
     EThcD,
 }
 
@@ -127,28 +126,13 @@ pub enum MobilityArrayKind {
     /// Bruker TIMS convention: per-peak 1/K0 in volt-second per square
     /// centimeter. Emitted as MS:1003008 "raw inverse reduced ion mobility
     /// array" with unit MS:1002814.
+    #[serde(rename = "inverse_reduced_k0")]
     InverseReducedVsPerCm2,
     /// Waters traveling-wave IMS convention: per-peak drift time in
     /// milliseconds. Emitted as MS:1003007 "raw ion mobility array" with
     /// unit UO:0000028 "millisecond".
+    #[serde(rename = "drift_time_ms")]
     DriftTimeMilliseconds,
-}
-
-impl MsPower {
-    /// Numeric MS level (1 for MS1, 2 for MS2, ...). Returns 1 for `Undefined`,
-    /// matching the convention used in mzML output.
-    pub fn ms_level(self) -> u32 {
-        match self {
-            Self::Undefined | Self::Ms1 => 1,
-            Self::Ms2 => 2,
-            Self::Ms3 => 3,
-            Self::Ms4 => 4,
-            Self::Ms5 => 5,
-            Self::Ms6 => 6,
-            Self::Ms7 => 7,
-            Self::Ms8 => 8,
-        }
-    }
 }
 
 impl Polarity {
@@ -217,5 +201,126 @@ impl MobilityArrayKind {
             Self::InverseReducedVsPerCm2 => "inverse_reduced_k0",
             Self::DriftTimeMilliseconds => "drift_time_ms",
         }
+    }
+}
+
+/// Unit of [`PrecursorInfo::collision_energy`](crate::PrecursorInfo::collision_energy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub enum CollisionEnergyUnit {
+    /// Electronvolts (absolute collision energy).
+    #[serde(rename = "ev")]
+    Ev,
+    /// Normalized collision energy, percent.
+    #[serde(rename = "nce")]
+    Nce,
+}
+
+impl CollisionEnergyUnit {
+    /// Stable label (`"ev"`, `"nce"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ev => "ev",
+            Self::Nce => "nce",
+        }
+    }
+}
+
+/// A label that is not the `as_str` label of any variant of the named enum.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown {enum_name} label {label:?}")]
+#[non_exhaustive]
+pub struct ParseLabelError {
+    /// Name of the enum that was being parsed.
+    pub enum_name: &'static str,
+    /// The label that matched no variant.
+    pub label: String,
+}
+
+macro_rules! from_str_labels {
+    ($ty:ident: $($variant:ident),+ $(,)?) => {
+        impl std::str::FromStr for $ty {
+            type Err = ParseLabelError;
+
+            /// Parse the label written by `as_str` (and by serde).
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                $(if s == Self::$variant.as_str() {
+                    return Ok(Self::$variant);
+                })+
+                Err(ParseLabelError {
+                    enum_name: stringify!($ty),
+                    label: s.to_string(),
+                })
+            }
+        }
+    };
+}
+
+from_str_labels!(Polarity: Positive, Negative);
+from_str_labels!(ScanMode: Centroid, Profile);
+from_str_labels!(Analyzer: ITMS, TQMS, SQMS, TOFMS, FTMS, Sector);
+from_str_labels!(
+    Activation: CID, HCD, ETD, ECD, UVPD, PQD, PD, SID, EThcD, IRMPD, MPID
+);
+from_str_labels!(MobilityArrayKind: InverseReducedVsPerCm2, DriftTimeMilliseconds);
+from_str_labels!(CollisionEnergyUnit: Ev, Nce);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roundtrip<T>(variants: &[T])
+    where
+        T: Copy
+            + PartialEq
+            + std::fmt::Debug
+            + std::str::FromStr
+            + serde::Serialize
+            + serde::de::DeserializeOwned,
+        <T as std::str::FromStr>::Err: std::fmt::Debug,
+    {
+        for &v in variants {
+            let json = serde_json::to_string(&v).unwrap();
+            let label: String = serde_json::from_str(&json).unwrap();
+            assert_eq!(label.parse::<T>().unwrap(), v, "{json}");
+            assert_eq!(serde_json::from_str::<T>(&json).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn serde_labels_are_the_as_str_labels() {
+        use Activation::*;
+        assert_eq!(serde_json::to_string(&Analyzer::TOFMS).unwrap(), r#""tof""#);
+        assert_eq!(
+            serde_json::to_string(&Polarity::Positive).unwrap(),
+            r#""positive""#
+        );
+        assert_eq!(
+            serde_json::to_string(&MobilityArrayKind::InverseReducedVsPerCm2).unwrap(),
+            r#""inverse_reduced_k0""#
+        );
+        roundtrip(&[Polarity::Positive, Polarity::Negative]);
+        roundtrip(&[ScanMode::Centroid, ScanMode::Profile]);
+        roundtrip(&[
+            Analyzer::ITMS,
+            Analyzer::TQMS,
+            Analyzer::SQMS,
+            Analyzer::TOFMS,
+            Analyzer::FTMS,
+            Analyzer::Sector,
+        ]);
+        roundtrip(&[CID, HCD, ETD, ECD, UVPD, PQD, PD, SID, EThcD, IRMPD, MPID]);
+        roundtrip(&[
+            MobilityArrayKind::InverseReducedVsPerCm2,
+            MobilityArrayKind::DriftTimeMilliseconds,
+        ]);
+        roundtrip(&[CollisionEnergyUnit::Ev, CollisionEnergyUnit::Nce]);
+    }
+
+    #[test]
+    fn unknown_labels_are_errors() {
+        let e = "TOFMS".parse::<Analyzer>().unwrap_err();
+        assert_eq!(e.enum_name, "Analyzer");
+        assert!(serde_json::from_str::<Analyzer>(r#""TOFMS""#).is_err());
     }
 }

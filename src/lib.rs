@@ -8,7 +8,7 @@
 //!   [`SpectrumRecord`], [`PrecursorInfo`], [`ChromatogramRecord`],
 //!   [`RunMetadata`], [`CvTerm`]. All are `#[non_exhaustive]` and built with
 //!   constructors plus `with_*` setters.
-//! * Shared enums: [`Polarity`], [`ScanMode`], [`Analyzer`], [`MsPower`],
+//! * Shared enums: [`Polarity`], [`ScanMode`], [`Analyzer`],
 //!   [`Activation`], [`Compression`], [`MobilityArrayKind`].
 //! * A trait every vendor parser implements: [`SpectrumSource`]. Its
 //!   iterators yield `Result` items, so decode errors reach the consumer.
@@ -32,24 +32,33 @@
 mod centroid;
 mod enums;
 mod error;
+mod leniency;
 mod mzml;
 mod source;
 mod types;
+mod validate;
+mod warning;
 
 pub mod conformance;
 pub mod cv;
 
 pub use centroid::Centroided;
 pub use enums::{
-    Activation, Analyzer, Compression, MobilityArrayKind, MsPower, Polarity, ScanMode,
+    Activation, Analyzer, CollisionEnergyUnit, Compression, MobilityArrayKind, ParseLabelError,
+    Polarity, ScanMode,
 };
-pub use error::{Error, Result};
+pub use error::{Error, RecordProblem, Result};
+pub use leniency::{Check, Leniency, UnknownCheck};
 pub use mzml::{
     write_indexed_mzml, write_indexed_mzml_with_options, write_mzml, write_mzml_with_options,
-    RecordErrorPolicy, WriteOptions, WriteSummary,
+    CountMismatch, RecordErrorPolicy, RecordKind, WriteIssue, WriteOptions, WriteSummary,
 };
 pub use source::{ChromatogramIter, SpectrumIter, SpectrumSource};
-pub use types::{ChromatogramRecord, CvTerm, PrecursorInfo, RunMetadata, SpectrumRecord};
+pub use types::{
+    ChromatogramRecord, CollisionEnergy, CvTerm, PrecursorInfo, RunMetadata, ScanWindow,
+    SpectrumRecord, TimeAxis,
+};
+pub use warning::{Warning, WarningKind};
 
 /// Crate version (set from `Cargo.toml`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

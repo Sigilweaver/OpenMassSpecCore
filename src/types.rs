@@ -17,7 +17,10 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use crate::cv;
-use crate::enums::{Activation, Analyzer, MobilityArrayKind, Polarity, ScanMode};
+use crate::enums::{
+    Activation, Analyzer, CollisionEnergyUnit, MobilityArrayKind, Polarity, ScanMode,
+};
+use crate::warning::Warning;
 
 /// Generates builder setters: `KIND SETTER FIELD: TYPE`.
 ///
@@ -110,18 +113,27 @@ pub struct PrecursorInfo {
     pub charge: Option<i32>,
     /// Precursor intensity (when known).
     pub intensity: Option<f64>,
-    /// Collision energy. Interpretation depends on `ce_is_nce`.
-    pub collision_energy: Option<f64>,
-    /// `true` if `collision_energy` is normalized (NCE %); `false` for eV.
-    pub ce_is_nce: bool,
+    /// Collision energies, each with its own unit. One entry normally;
+    /// stepped or combined activation has several. A `None` unit means the
+    /// reader does not know it; the mzML writer then rejects the record
+    /// rather than guess eV (unless `Check::UnknownCollisionEnergyUnit` is
+    /// allowed).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collision_energies: Vec<CollisionEnergy>,
+    /// Core 3 key, rejected on input (see `removed_field!`).
+    #[serde(default, rename = "collision_energy", skip_serializing)]
+    pub(crate) removed_collision_energy: Option<RemovedCollisionEnergy>,
+    /// Core 3 key, rejected on input (see `removed_field!`).
+    #[serde(default, rename = "ce_is_nce", skip_serializing)]
+    pub(crate) removed_ce_is_nce: Option<RemovedCeIsNce>,
     /// Native ID of the precursor scan when known. Vendors should populate
     /// this with the same string they will use as the `native_id` for that
     /// MS1 spectrum, so mzML `spectrumRef` lookups round-trip cleanly.
     pub precursor_native_id: Option<String>,
     /// Activation (dissociation) method.
     pub activation: Option<Activation>,
-    /// Analyzer that recorded the precursor scan; needed by mzML to
-    /// disambiguate CID vs beam-type CID on FTMS instruments.
+    /// Analyzer that recorded the precursor scan. Not used to choose the
+    /// dissociation term.
     pub analyzer: Option<Analyzer>,
     /// Collision cross-sectional area of the selected ion, in square
     /// angstroms. Derived from ion-mobility measurements (Bruker 1/K0,
@@ -129,6 +141,51 @@ pub struct PrecursorInfo {
     /// should convert before populating this rather than leaving it for
     /// downstream consumers to guess a calibration.
     pub ccs: Option<f64>,
+}
+
+/// Declares a JSON key that Core 3 wrote and Core 4 removed. A non-null
+/// value is a deserialization error that names the replacement, so old
+/// records are rejected instead of silently losing the field.
+macro_rules! removed_field {
+    ($name:ident, $msg:expr) => {
+        #[derive(Debug, Clone, PartialEq)]
+        pub(crate) struct $name;
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
+                Err(serde::de::Error::custom($msg))
+            }
+        }
+    };
+}
+removed_field!(
+    RemovedScanWindow,
+    "`scan_window` was replaced by `scan_windows`, a list of {lower, upper}"
+);
+removed_field!(
+    RemovedCollisionEnergy,
+    "`collision_energy` was replaced by `collision_energies`, a list of {value, unit}"
+);
+removed_field!(
+    RemovedCeIsNce,
+    "`ce_is_nce` was replaced by the `unit` of each entry in `collision_energies`"
+);
+
+/// An instrument scan window: the m/z range acquired.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct ScanWindow {
+    /// Lower m/z limit.
+    pub lower: f64,
+    /// Upper m/z limit.
+    pub upper: f64,
+}
+
+impl ScanWindow {
+    /// A window from `lower` to `upper` m/z.
+    pub fn new(lower: f64, upper: f64) -> Self {
+        Self { lower, upper }
+    }
 }
 
 /// One fully-decoded spectrum.
@@ -148,7 +205,8 @@ pub struct PrecursorInfo {
 ///
 /// ```
 /// use openmassspec_core::{
-///     Activation, Analyzer, Polarity, PrecursorInfo, ScanMode, SpectrumRecord,
+///     Activation, Analyzer, CollisionEnergyUnit, Polarity, PrecursorInfo, ScanMode,
+///     SpectrumRecord,
 /// };
 ///
 /// let precursor = PrecursorInfo::default()
@@ -156,8 +214,7 @@ pub struct PrecursorInfo {
 ///     .with_selected_mz(445.1201)
 ///     .with_isolation_width(1.6)
 ///     .with_charge(2)
-///     .with_collision_energy(30.0)
-///     .with_ce_is_nce(true)
+///     .with_collision_energy(30.0, CollisionEnergyUnit::Nce)
 ///     .with_activation(Activation::HCD)
 ///     .with_precursor_native_id("controllerType=0 controllerNumber=1 scan=41".to_string());
 ///
@@ -208,8 +265,9 @@ pub struct SpectrumRecord {
     /// Thermo-style scan filter (or vendor-equivalent). Optional; populated
     /// by parsers that have a meaningful filter string.
     pub filter: Option<String>,
-    /// Retention time in seconds.
-    pub retention_time_sec: f64,
+    /// Retention time in seconds. `None` when the source has no time axis
+    /// (the writer omits the scan start time).
+    pub retention_time_sec: Option<f64>,
     /// Total ion current. If `None`, the mzML writer computes it from
     /// `intensity`.
     pub total_ion_current: Option<f64>,
@@ -223,6 +281,15 @@ pub struct SpectrumRecord {
     pub low_mz: Option<f64>,
     /// Highest observed m/z. If `None`, the writer uses `mz.last()`.
     pub high_mz: Option<f64>,
+    /// Instrument scan windows in m/z: the acquisition ranges, which are not
+    /// the observed range of the peaks. Segmented and multi-window
+    /// acquisitions have several. The mzML writer emits `scanWindowList`
+    /// only from this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scan_windows: Vec<ScanWindow>,
+    /// Core 3 key, rejected on input (see `removed_field!`).
+    #[serde(default, rename = "scan_window", skip_serializing)]
+    pub(crate) removed_scan_window: Option<RemovedScanWindow>,
     /// Ion injection (accumulation) time in milliseconds.
     pub ion_injection_time_ms: Option<f64>,
     /// Mean inverse reduced ion mobility (1/K0) for the spectrum, when
@@ -242,6 +309,10 @@ pub struct SpectrumRecord {
     /// when an IMS-resolved parser opts to preserve it. Length must equal
     /// `mz.len()` when present.
     pub inv_mobility_per_peak: Option<Vec<f32>>,
+    /// Warnings attached by the reader or by a lenient mode; see
+    /// [`Warning`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<Warning>,
     /// Namespaced reader-specific values. Keys use `<reader>.<field>`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, String>,
@@ -262,12 +333,14 @@ impl SpectrumRecord {
             analyzer: None,
             acquisition_event_id: None,
             filter: None,
-            retention_time_sec: 0.0,
+            retention_time_sec: None,
             total_ion_current: None,
             base_peak_mz: None,
             base_peak_intensity: None,
             low_mz: None,
             high_mz: None,
+            scan_windows: Vec::new(),
+            removed_scan_window: None,
             ion_injection_time_ms: None,
             inv_mobility: None,
             faims_cv: None,
@@ -275,6 +348,7 @@ impl SpectrumRecord {
             mz: Vec::new(),
             intensity: Vec::new(),
             inv_mobility_per_peak: None,
+            warnings: Vec::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -289,6 +363,26 @@ impl SpectrumRecord {
     /// Insert one `extra` entry. Keys use `<reader>.<field>`.
     pub fn with_extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra.insert(key.into(), value.into());
+        self
+    }
+
+    /// Check the record for the problems the mzML writer and the Arrow
+    /// bridge reject: mismatched array lengths, non-finite numbers, an
+    /// unsorted m/z array, invalid scan windows, `ms_level` 0, and charge,
+    /// intensity or CCS without a selected-ion m/z. Checks that need the
+    /// rest of the run (duplicate ids, precursor references, scan mode) are
+    /// the writer's.
+    ///
+    /// # Errors
+    ///
+    /// The first problem found, as a [`RecordProblem`].
+    pub fn validate(&self) -> Result<(), crate::RecordProblem> {
+        crate::validate::check_spectrum(self)
+    }
+
+    /// Append one scan window (`lower` to `upper` m/z).
+    pub fn with_scan_window(mut self, lower: f64, upper: f64) -> Self {
+        self.scan_windows.push(ScanWindow::new(lower, upper));
         self
     }
 
@@ -307,15 +401,17 @@ impl SpectrumRecord {
         if self.intensity.is_empty() {
             return None;
         }
-        let mut best_idx = 0usize;
-        let mut best = self.intensity[0];
-        for (i, &v) in self.intensity.iter().enumerate().skip(1) {
-            if v > best {
-                best = v;
-                best_idx = i;
+        // `total_cmp` orders NaN above every number, so a NaN is a visible
+        // maximum rather than being skipped; the writer rejects non-finite
+        // values before they get here. The first maximum wins ties.
+        let (best_idx, best) = self.intensity.iter().copied().enumerate().reduce(|a, b| {
+            if b.1.total_cmp(&a.1).is_gt() {
+                b
+            } else {
+                a
             }
-        }
-        Some((self.mz[best_idx], best as f64))
+        })?;
+        Some((*self.mz.get(best_idx)?, best as f64))
     }
 
     /// `(low_mz, high_mz)`, falling back to the first/last entries in `mz`
@@ -352,9 +448,23 @@ pub struct ChromatogramRecord {
     pub time_sec: Vec<f32>,
     /// Intensities, parallel to `time_sec`.
     pub intensity: Vec<f32>,
+    /// Warnings attached by the reader or by a lenient mode; see
+    /// [`Warning`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<Warning>,
 }
 
 impl ChromatogramRecord {
+    /// Check the record for mismatched array lengths and non-finite
+    /// numbers (see [`SpectrumRecord::validate`]).
+    ///
+    /// # Errors
+    ///
+    /// The first problem found, as a [`RecordProblem`].
+    pub fn validate(&self) -> Result<(), crate::RecordProblem> {
+        crate::validate::check_chromatogram(self)
+    }
+
     /// A chromatogram with the given id and arrays and no type, precursor,
     /// or product.
     pub fn new(
@@ -371,8 +481,27 @@ impl ChromatogramRecord {
             product_mz: None,
             time_sec,
             intensity,
+            warnings: Vec::new(),
         }
     }
+}
+
+/// Whether the spectra of a run have a retention time.
+///
+/// A reader whose format has no time axis says so with
+/// [`TimeAxis::Absent`]; otherwise every spectrum must carry
+/// `retention_time_sec`, and a missing one is an error instead of a
+/// silently omitted scan start time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub enum TimeAxis {
+    /// Every spectrum has a retention time (the default).
+    #[default]
+    #[serde(rename = "retention_time")]
+    Retention,
+    /// The format has no time axis; no spectrum has a retention time.
+    #[serde(rename = "absent")]
+    Absent,
 }
 
 /// Run-level metadata.
@@ -425,6 +554,10 @@ pub struct RunMetadata {
     /// spectra in this run. `None` is treated as the Bruker convention
     /// ([`MobilityArrayKind::InverseReducedVsPerCm2`]).
     pub mobility_array_kind: Option<MobilityArrayKind>,
+    /// Whether spectra have a retention time. Defaults to
+    /// [`TimeAxis::Retention`]: a spectrum without one is then an error.
+    #[serde(default)]
+    pub time_axis: TimeAxis,
     /// Physical mass-analyzer components this instrument has, in a stable
     /// order. Static instrument configuration, not derived from scan data -
     /// vendors already resolve `instrument` from a model lookup, so this is
@@ -438,6 +571,10 @@ pub struct RunMetadata {
     /// a Fusion) preserve per-scan analyzer identity. When empty, every
     /// spectrum references the single default `IC1`.
     pub analyzers: Vec<Analyzer>,
+    /// Warnings attached by the reader or by a lenient mode; see
+    /// [`Warning`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<Warning>,
     /// Namespaced reader-specific values. Keys use `<reader>.<field>`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, String>,
@@ -466,7 +603,9 @@ impl RunMetadata {
             acquisition_software_version: None,
             start_timestamp: None,
             mobility_array_kind: None,
+            time_axis: TimeAxis::Retention,
             analyzers: Vec::new(),
+            warnings: Vec::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -488,12 +627,13 @@ setters!(SpectrumRecord {
     opt with_analyzer analyzer: Analyzer,
     opt with_acquisition_event_id acquisition_event_id: u32,
     opt with_filter filter: String,
-    val with_retention_time_sec retention_time_sec: f64,
+    opt with_retention_time_sec retention_time_sec: f64,
     opt with_total_ion_current total_ion_current: f64,
     opt with_base_peak_mz base_peak_mz: f64,
     opt with_base_peak_intensity base_peak_intensity: f64,
     opt with_low_mz low_mz: f64,
     opt with_high_mz high_mz: f64,
+    val with_scan_windows scan_windows: Vec<ScanWindow>,
     opt with_ion_injection_time_ms ion_injection_time_ms: f64,
     opt with_inv_mobility inv_mobility: f64,
     opt with_faims_cv faims_cv: f64,
@@ -504,14 +644,65 @@ setters!(SpectrumRecord {
     val with_extra_map extra: BTreeMap<String, String>,
 });
 
+macro_rules! push_warning {
+    ($($ty:ident),+) => {$(
+        impl $ty {
+            /// Append one [`Warning`].
+            #[must_use]
+            pub fn with_warning(mut self, warning: Warning) -> Self {
+                self.warnings.push(warning);
+                self
+            }
+        }
+    )+};
+}
+push_warning!(SpectrumRecord, ChromatogramRecord, RunMetadata);
+
+/// One collision energy and its unit.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct CollisionEnergy {
+    /// The energy.
+    pub value: f64,
+    /// Its unit; `None` when the reader does not know.
+    pub unit: Option<CollisionEnergyUnit>,
+}
+
+impl CollisionEnergy {
+    /// An energy of `value` in `unit` (`None` if unknown).
+    pub fn new(value: f64, unit: impl Into<Option<CollisionEnergyUnit>>) -> Self {
+        Self {
+            value,
+            unit: unit.into(),
+        }
+    }
+}
+
+impl PrecursorInfo {
+    /// Append one collision energy. Pass the unit the source states, or
+    /// `None` when it does not say; there is no default. A `None` value
+    /// (the source has no energy) appends nothing and ignores the unit.
+    #[must_use]
+    pub fn with_collision_energy(
+        mut self,
+        value: impl Into<Option<f64>>,
+        unit: impl Into<Option<CollisionEnergyUnit>>,
+    ) -> Self {
+        if let Some(value) = value.into() {
+            self.collision_energies
+                .push(CollisionEnergy::new(value, unit));
+        }
+        self
+    }
+}
+
 setters!(PrecursorInfo {
     opt with_target_mz target_mz: f64,
     opt with_selected_mz selected_mz: f64,
     opt with_isolation_width isolation_width: f64,
     opt with_charge charge: i32,
     opt with_intensity intensity: f64,
-    opt with_collision_energy collision_energy: f64,
-    val with_ce_is_nce ce_is_nce: bool,
+    val with_collision_energies collision_energies: Vec<CollisionEnergy>,
     opt with_precursor_native_id precursor_native_id: String,
     opt with_activation activation: Activation,
     opt with_analyzer analyzer: Analyzer,
@@ -526,6 +717,7 @@ setters!(ChromatogramRecord {
     opt with_product_mz product_mz: f64,
     val with_time_sec time_sec: Vec<f32>,
     val with_intensity intensity: Vec<f32>,
+    val with_warnings warnings: Vec<Warning>,
 });
 
 setters!(RunMetadata {
@@ -540,7 +732,9 @@ setters!(RunMetadata {
     opt with_acquisition_software_version acquisition_software_version: String,
     opt with_start_timestamp start_timestamp: String,
     opt with_mobility_array_kind mobility_array_kind: MobilityArrayKind,
+    val with_time_axis time_axis: TimeAxis,
     val with_analyzers analyzers: Vec<Analyzer>,
+    val with_warnings warnings: Vec<Warning>,
     val with_extra_map extra: BTreeMap<String, String>,
 });
 
@@ -628,5 +822,43 @@ mod tests {
         metadata_json.as_object_mut().unwrap().remove("extra");
         let metadata: RunMetadata = serde_json::from_value(metadata_json).unwrap();
         assert!(metadata.extra.is_empty());
+    }
+
+    #[test]
+    fn base_peak_is_not_hidden_by_nan_at_index_zero() {
+        let rec =
+            SpectrumRecord::new(0, 1, "scan=1").with_peaks(vec![100.0, 200.0], vec![f32::NAN, 5.0]);
+        let (_, i) = rec.effective_base_peak().unwrap();
+        assert!(i.is_nan(), "a NaN must surface, not be skipped");
+    }
+
+    #[test]
+    fn core_3_json_keys_are_rejected_with_a_pointer_to_the_replacement() {
+        let rec = SpectrumRecord::new(0, 1, "scan=1").with_scan_window(50.0, 500.0);
+        let json = serde_json::to_value(&rec).unwrap();
+        assert!(json.get("scan_window").is_none());
+        assert!(json.get("scan_windows").is_some());
+        let back: SpectrumRecord = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, rec);
+
+        // A Core 3 record: a scan_window value is an error ...
+        let mut old = json.clone();
+        old["scan_window"] = serde_json::json!([50.0, 500.0]);
+        let err = serde_json::from_value::<SpectrumRecord>(old).unwrap_err();
+        assert!(err.to_string().contains("scan_windows"), "{err}");
+        // ... but the null Core 3 wrote for "no window" is fine.
+        let mut null = json;
+        null["scan_window"] = serde_json::Value::Null;
+        serde_json::from_value::<SpectrumRecord>(null).unwrap();
+
+        let p = PrecursorInfo::default().with_collision_energy(30.0, CollisionEnergyUnit::Nce);
+        let mut pj = serde_json::to_value(&p).unwrap();
+        assert!(pj.get("ce_is_nce").is_none() && pj.get("collision_energy").is_none());
+        pj["ce_is_nce"] = serde_json::json!(true);
+        let err = serde_json::from_value::<PrecursorInfo>(pj.clone()).unwrap_err();
+        assert!(err.to_string().contains("collision_energies"), "{err}");
+        pj.as_object_mut().unwrap().remove("ce_is_nce");
+        pj["collision_energy"] = serde_json::json!(30.0);
+        assert!(serde_json::from_value::<PrecursorInfo>(pj).is_err());
     }
 }

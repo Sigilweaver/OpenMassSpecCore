@@ -3,7 +3,7 @@
 //! output contains the expected spectra.
 
 use openmassspec_core::{
-    write_indexed_mzml, write_mzml, Activation, Analyzer, CvTerm, MsPower, Polarity, PrecursorInfo,
+    write_indexed_mzml, write_mzml, Activation, Analyzer, CvTerm, Polarity, PrecursorInfo,
     RunMetadata, ScanMode, SpectrumIter, SpectrumRecord, SpectrumSource,
 };
 
@@ -22,9 +22,10 @@ impl ToySource {
             CvTerm::new("MS:1001911", "Q Exactive"),
             "toy-writer",
             "0.0.0",
-        );
+        )
+        .with_analyzers(vec![Analyzer::FTMS]);
         let s1 = SpectrumRecord::new(0, 1, "controllerType=0 controllerNumber=1 scan=1")
-            .with_ms_level(MsPower::Ms1.ms_level())
+            .with_ms_level(1)
             .with_polarity(Polarity::Positive)
             .with_scan_mode(ScanMode::Centroid)
             .with_analyzer(Analyzer::FTMS)
@@ -33,7 +34,7 @@ impl ToySource {
             .with_ion_injection_time_ms(20.0)
             .with_peaks(vec![100.0, 200.0, 300.0], vec![1.0, 5.0, 2.0]);
         let s2 = SpectrumRecord::new(1, 2, "controllerType=0 controllerNumber=1 scan=2")
-            .with_ms_level(MsPower::Ms2.ms_level())
+            .with_ms_level(2)
             .with_polarity(Polarity::Positive)
             .with_scan_mode(ScanMode::Centroid)
             .with_analyzer(Analyzer::FTMS)
@@ -52,8 +53,7 @@ impl ToySource {
                     .with_selected_mz(200.001)
                     .with_isolation_width(2.0)
                     .with_charge(2)
-                    .with_collision_energy(28.0)
-                    .with_ce_is_nce(true)
+                    .with_collision_energy(28.0, openmassspec_core::CollisionEnergyUnit::Nce)
                     .with_precursor_native_id(
                         "controllerType=0 controllerNumber=1 scan=1".to_string(),
                     )
@@ -102,8 +102,9 @@ fn writes_plain_mzml() {
     assert!(s.contains(r#"id="controllerType=0 controllerNumber=1 scan=1""#));
     assert!(s.contains(r#"id="controllerType=0 controllerNumber=1 scan=2""#));
     assert!(s.contains(r#"<cvParam cvRef="MS" accession="MS:1001911" name="Q Exactive""#));
-    // CID on FTMS analyzer should map to beam-type CID, not ion-trap CID.
-    assert!(s.contains(r#"accession="MS:1000422" name="beam-type collision-induced dissociation""#));
+    // CID stays resonant CID whatever analyzer read the fragments out.
+    assert!(s.contains(r#"accession="MS:1000133" name="collision-induced dissociation""#));
+    assert!(!s.contains("MS:1000422"));
     // s2 carries a FAIMS CV; s1 does not.
     assert!(
         s.contains(r#"accession="MS:1001581" name="FAIMS compensation voltage" value="-45.0000""#)
