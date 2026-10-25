@@ -7,6 +7,7 @@
 //! `Result<_, Error>` items, and vendor errors travel inside
 //! [`Error::Vendor`].
 
+use std::borrow::Cow;
 use std::io;
 
 /// Stack-wide error type.
@@ -25,15 +26,7 @@ pub enum Error {
     /// type, preserved via `Box<dyn std::error::Error>` so callers can
     /// downcast if they need vendor-specific context.
     #[error("vendor parser error: {0}")]
-    Vendor(Box<dyn std::error::Error + Send + Sync + 'static>),
-
-    /// Format detection failed or the input does not match a supported vendor.
-    #[error("unsupported or unrecognized format: {0}")]
-    Format(String),
-
-    /// Conformance harness rejected a record stream.
-    #[error("conformance violation: {0}")]
-    Conformance(String),
+    Vendor(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
 
     /// A spectrum or chromatogram record failed the writer's checks. The
     /// record is identified by its native id (or chromatogram id).
@@ -131,15 +124,58 @@ pub enum RecordProblem {
         /// Which field is set.
         field: &'static str,
     },
-    /// Per-peak mobility needs a mobility kind that the writer cannot express.
-    #[error("{0}")]
-    Unsupported(String),
+    /// The spectrum has a scan-level mobility but the run's mobility array
+    /// kind is not 1/K0; the writer has no scan-level drift-time term.
+    #[error("spectrum-level inv_mobility needs mobility_array_kind inverse_reduced_k0, run declares {array_kind}")]
+    #[non_exhaustive]
+    ScanMobilityKindUnsupported {
+        /// The run's declared kind (`as_str`).
+        array_kind: &'static str,
+    },
+    /// A collision-energy unit the writer has no term for.
+    #[error("collision energy unit {unit:?} has no mzML term in this writer")]
+    #[non_exhaustive]
+    CollisionEnergyUnitUnsupported {
+        /// The unit's label.
+        unit: &'static str,
+    },
+    /// `ms_level` is 0; MS levels start at 1.
+    #[error("ms_level is 0 (levels start at 1)")]
+    MsLevelZero,
+    /// A problem reported by a reader crate or a newer Core, identified by a
+    /// namespaced code.
+    #[error("{code}: {message}")]
+    #[non_exhaustive]
+    Other {
+        /// Namespaced code (`"opentimstdf.mobility_range"`).
+        code: Cow<'static, str>,
+        /// Human-readable detail.
+        message: String,
+    },
+}
+
+impl RecordProblem {
+    /// A reader-defined problem with a namespaced `code`.
+    pub fn other(code: impl Into<Cow<'static, str>>, message: impl Into<String>) -> Self {
+        Self::Other {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
 }
 
 /// Convenience alias.
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
+    /// A record error for the record `record_id`.
+    pub fn record(record_id: impl Into<String>, problem: RecordProblem) -> Self {
+        Error::Record {
+            record_id: record_id.into(),
+            problem,
+        }
+    }
+
     /// Wrap a vendor-crate error into [`Error::Vendor`].
     ///
     /// Usable directly as a `map_err` argument:

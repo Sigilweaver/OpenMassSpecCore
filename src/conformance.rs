@@ -365,7 +365,7 @@ mod tests {
             let fail_at = self.1;
             Box::new(self.0.clone().into_iter().enumerate().map(move |(i, s)| {
                 if Some(i) == fail_at {
-                    Err(crate::Error::Format("bad block".into()))
+                    Err(crate::Error::vendor(std::io::Error::other("bad block")))
                 } else {
                     Ok(s)
                 }

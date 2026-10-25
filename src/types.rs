@@ -328,6 +328,20 @@ impl SpectrumRecord {
         self
     }
 
+    /// Check the record for the problems the mzML writer and the Arrow
+    /// bridge reject: mismatched array lengths, non-finite numbers, an
+    /// unsorted m/z array, invalid scan windows, `ms_level` 0, and charge,
+    /// intensity or CCS without a selected-ion m/z. Checks that need the
+    /// rest of the run (duplicate ids, precursor references, scan mode) are
+    /// the writer's.
+    ///
+    /// # Errors
+    ///
+    /// The first problem found, as a [`RecordProblem`].
+    pub fn validate(&self) -> Result<(), crate::RecordProblem> {
+        crate::validate::check_spectrum(self)
+    }
+
     /// Append one scan window (`lower` to `upper` m/z).
     pub fn with_scan_window(mut self, lower: f64, upper: f64) -> Self {
         self.scan_windows.push(ScanWindow::new(lower, upper));
@@ -403,6 +417,16 @@ pub struct ChromatogramRecord {
 }
 
 impl ChromatogramRecord {
+    /// Check the record for mismatched array lengths and non-finite
+    /// numbers (see [`SpectrumRecord::validate`]).
+    ///
+    /// # Errors
+    ///
+    /// The first problem found, as a [`RecordProblem`].
+    pub fn validate(&self) -> Result<(), crate::RecordProblem> {
+        crate::validate::check_chromatogram(self)
+    }
+
     /// A chromatogram with the given id and arrays and no type, precursor,
     /// or product.
     pub fn new(

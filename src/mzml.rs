@@ -1331,11 +1331,9 @@ fn check_spectrum_for_write(
     }
     if rec.inv_mobility.is_some() && mobility_kind == Some(MobilityArrayKind::DriftTimeMilliseconds)
     {
-        return Err(RecordProblem::Unsupported(
-            "spectrum-level inv_mobility with mobility_array_kind DriftTimeMilliseconds: \
-             the writer has no scan-level drift-time term"
-                .into(),
-        ));
+        return Err(RecordProblem::ScanMobilityKindUnsupported {
+            array_kind: MobilityArrayKind::DriftTimeMilliseconds.as_str(),
+        });
     }
     let mut flags = WriteFlags::default();
     if rec.scan_mode.is_none() {
@@ -1373,10 +1371,9 @@ fn check_spectrum_for_write(
                 ce.unit,
                 None | Some(CollisionEnergyUnit::Ev | CollisionEnergyUnit::Nce)
             ) {
-                return Err(RecordProblem::Unsupported(format!(
-                    "collision energy unit {:?} has no mzML term in this writer",
-                    ce.unit
-                )));
+                return Err(RecordProblem::CollisionEnergyUnitUnsupported {
+                    unit: ce.unit.map_or("", CollisionEnergyUnit::as_str),
+                });
             }
         }
         if p.collision_energies.iter().any(|ce| ce.unit.is_none()) {

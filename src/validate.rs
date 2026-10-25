@@ -36,6 +36,9 @@ fn finite_opt(field: &str, value: Option<f64>) -> Result<(), RecordProblem> {
 /// array. Does not look at scan mode, ids or analyzers; the writer checks
 /// those against its own state.
 pub(crate) fn check_spectrum(rec: &SpectrumRecord) -> Result<(), RecordProblem> {
+    if rec.ms_level == 0 {
+        return Err(RecordProblem::MsLevelZero);
+    }
     check_array_lengths(rec)?;
     finite_opt("retention_time_sec", rec.retention_time_sec)?;
     finite_opt("total_ion_current", rec.total_ion_current)?;
