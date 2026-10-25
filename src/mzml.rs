@@ -626,11 +626,11 @@ pub struct WriteSummary {
     /// code, from the reader and from lenient writing. Empty when nothing
     /// was flagged.
     pub warning_counts: std::collections::BTreeMap<String, usize>,
-    /// `Some((hint, accounted))` when the source gave a
-    /// [`SpectrumSource::spectrum_count_hint`] and it differs from
+    /// `Some((hint, accounted))` when the source announced a
+    /// [`SpectrumSource::spectrum_count_hint`] larger than
     /// `spectra_written + spectra_skipped`. A skipped `Err` can stand for
-    /// several spectra and a source may end early after an `Err`, so a
-    /// mismatch means spectra may be unaccounted for.
+    /// several spectra and a source may end early after an `Err`, so spectra
+    /// may be unaccounted for.
     pub spectrum_count_mismatch: Option<(usize, usize)>,
 }
 
@@ -920,7 +920,9 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
     }
     if let Some(hint) = src.spectrum_count_hint() {
         let accounted = summary.spectra_written + summary.spectra_skipped;
-        if hint != accounted {
+        // Only fewer spectra than announced means data may be missing; a
+        // source that announces fewer than it yields has a wrong hint.
+        if accounted < hint {
             summary.spectrum_count_mismatch = Some((hint, accounted));
         }
     }
@@ -3395,6 +3397,10 @@ mod tests {
         assert_eq!(summary.spectrum_count_mismatch, Some((5, 1)));
         assert!(summary.has_warnings());
         src.count_hint = CountHint::Len;
+        let summary = write_mzml(&mut src, &mut Vec::new()).unwrap();
+        assert_eq!(summary.spectrum_count_mismatch, None);
+        // A hint below the number yielded is a wrong hint, not lost data.
+        src.count_hint = CountHint::Fixed(0);
         let summary = write_mzml(&mut src, &mut Vec::new()).unwrap();
         assert_eq!(summary.spectrum_count_mismatch, None);
     }

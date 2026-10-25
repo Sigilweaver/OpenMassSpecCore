@@ -88,7 +88,7 @@ Files that convert today can fail or read differently:
   written as a unit-less userParam. Check names (`as_str`, `FromStr`) are
   what command lines and Python keywords accept.
 - `WriteSummary::issues` (`WriteIssue`, `RecordKind`), `issues_truncated`,
-  `warning_counts`, `spectrum_count_mismatch` (source count hint differs from
+  `warning_counts`, `spectrum_count_mismatch` (source count hint is larger than
   spectra written plus skipped), `spectra_invalid`, `chromatograms_invalid`,
   and `WriteSummary::has_warnings`; `WriteOptions::max_reported_issues`.
 - `Error::Record`, `RecordProblem`.
