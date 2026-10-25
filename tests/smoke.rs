@@ -53,8 +53,7 @@ impl ToySource {
                     .with_selected_mz(200.001)
                     .with_isolation_width(2.0)
                     .with_charge(2)
-                    .with_collision_energy(28.0)
-                    .with_ce_is_nce(true)
+                    .with_collision_energy(28.0, openmassspec_core::CollisionEnergyUnit::Nce)
                     .with_precursor_native_id(
                         "controllerType=0 controllerNumber=1 scan=1".to_string(),
                     )

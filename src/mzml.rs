@@ -1368,7 +1368,18 @@ fn check_spectrum_for_write(
         }
     }
     if let Some(p) = &rec.precursor {
-        if p.collision_energy.is_some() && p.collision_energy_unit.is_none() {
+        for ce in &p.collision_energies {
+            if !matches!(
+                ce.unit,
+                None | Some(CollisionEnergyUnit::Ev | CollisionEnergyUnit::Nce)
+            ) {
+                return Err(RecordProblem::Unsupported(format!(
+                    "collision energy unit {:?} has no mzML term in this writer",
+                    ce.unit
+                )));
+            }
+        }
+        if p.collision_energies.iter().any(|ce| ce.unit.is_none()) {
             if !leniency.allows(&Check::UnknownCollisionEnergyUnit) {
                 return Err(RecordProblem::CollisionEnergyUnitUnknown);
             }
@@ -1643,33 +1654,36 @@ fn write_spectrum<W: Write>(
                 cv_param(out, P, *term, "")?;
             }
         }
-        if let Some(e) = pre.collision_energy {
-            if flags.unitless_collision_energy {
-                // Unit unknown: neither eV nor NCE is asserted.
-                // (userParams follow the cvParams, so it is written below.)
-            } else if pre.collision_energy_unit == Some(CollisionEnergyUnit::Nce) {
-                cv_param_with_unit(
+        for ce in &pre.collision_energies {
+            let e = ce.value;
+            // An exhaustive match: a new unit is a compile error here, not
+            // a silent eV. Unknown units are written below as userParams.
+            match ce.unit {
+                Some(CollisionEnergyUnit::Nce) => cv_param_with_unit(
                     out,
                     P,
                     cv::NORMALIZED_COLLISION_ENERGY,
                     format_args!("{e:.2}"),
                     cv::PERCENT,
-                )?;
-            } else {
-                cv_param_with_unit(
+                )?,
+                Some(CollisionEnergyUnit::Ev) => cv_param_with_unit(
                     out,
                     P,
                     cv::COLLISION_ENERGY,
                     format_args!("{e:.2}"),
                     cv::ELECTRONVOLT,
-                )?;
+                )?,
+                // Unknown or future units: rejected by the check, or (None)
+                // written below as unit-less userParams.
+                None => {}
             }
         }
         // userParams follow the cvParams.
-        if let (true, Some(e)) = (flags.unitless_collision_energy, pre.collision_energy) {
+        for ce in pre.collision_energies.iter().filter(|ce| ce.unit.is_none()) {
             writeln!(
                 out,
-                r#"              <userParam name="openmassspec: collision energy (unit unknown)" value="{e:.2}"/>"#
+                r#"              <userParam name="openmassspec: collision energy (unit unknown)" value="{:.2}"/>"#,
+                ce.value
             )?;
         }
         match pre.activation {
@@ -2391,8 +2405,9 @@ mod tests {
             precursor: Some(crate::types::PrecursorInfo {
                 selected_mz: Some(500.5),
                 activation,
-                collision_energy: nce,
-                collision_energy_unit: nce.map(|_| CollisionEnergyUnit::Nce),
+                collision_energies: nce
+                    .map(|e| vec![crate::CollisionEnergy::new(e, CollisionEnergyUnit::Nce)])
+                    .unwrap_or_default(),
                 ..Default::default()
             }),
             ..minimal_spectrum(0, None)
@@ -3482,18 +3497,36 @@ mod tests {
         rec.precursor = Some(
             crate::PrecursorInfo::default()
                 .with_selected_mz(500.0)
-                .with_collision_energy(30.0),
+                .with_collision_energy(30.0, None),
         );
         assert_eq!(
             problem_of(write_one(rec.clone(), &WriteOptions::new())),
             RecordProblem::CollisionEnergyUnitUnknown
         );
         let mut ev = rec.clone();
-        ev.precursor = ev
-            .precursor
-            .map(|p| p.with_collision_energy_unit(CollisionEnergyUnit::Ev));
+        ev.precursor = Some(
+            crate::PrecursorInfo::default()
+                .with_selected_mz(500.0)
+                .with_collision_energy(30.0, CollisionEnergyUnit::Ev),
+        );
         let (s, _) = write_one(ev, &WriteOptions::new()).unwrap();
         assert!(s.contains("unitName=\"electronvolt\""));
+    }
+
+    #[test]
+    fn stepped_collision_energies_are_all_written_with_their_units() {
+        let mut rec = minimal_spectrum(0, None);
+        rec.ms_level = 2;
+        rec.precursor = Some(
+            crate::PrecursorInfo::default()
+                .with_selected_mz(500.0)
+                .with_collision_energy(20.0, CollisionEnergyUnit::Nce)
+                .with_collision_energy(30.0, CollisionEnergyUnit::Nce)
+                .with_collision_energy(40.0, CollisionEnergyUnit::Ev),
+        );
+        let (s, _) = write_one(rec, &WriteOptions::new()).unwrap();
+        assert_eq!(s.matches("MS:1000138").count(), 2);
+        assert_eq!(s.matches("MS:1000045").count(), 1);
     }
 
     #[test]
@@ -3503,7 +3536,7 @@ mod tests {
         rec.precursor = Some(
             crate::PrecursorInfo::default()
                 .with_selected_mz(500.0)
-                .with_collision_energy(30.0),
+                .with_collision_energy(30.0, None),
         );
         let opts = WriteOptions::new()
             .with_leniency(Leniency::strict().with(Check::UnknownCollisionEnergyUnit));

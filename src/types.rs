@@ -113,12 +113,13 @@ pub struct PrecursorInfo {
     pub charge: Option<i32>,
     /// Precursor intensity (when known).
     pub intensity: Option<f64>,
-    /// Collision energy. Its unit is `collision_energy_unit`.
-    pub collision_energy: Option<f64>,
-    /// Unit of `collision_energy`. `None` means the reader does not know;
-    /// the mzML writer then rejects a record that has a collision energy
-    /// rather than guess eV.
-    pub collision_energy_unit: Option<CollisionEnergyUnit>,
+    /// Collision energies, each with its own unit. One entry normally;
+    /// stepped or combined activation has several. A `None` unit means the
+    /// reader does not know it; the mzML writer then rejects the record
+    /// rather than guess eV (unless `Check::UnknownCollisionEnergyUnit` is
+    /// allowed).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collision_energies: Vec<CollisionEnergy>,
     /// Native ID of the precursor scan when known. Vendors should populate
     /// this with the same string they will use as the `native_id` for that
     /// MS1 spectrum, so mzML `spectrumRef` lookups round-trip cleanly.
@@ -170,7 +171,8 @@ impl ScanWindow {
 ///
 /// ```
 /// use openmassspec_core::{
-///     Activation, Analyzer, Polarity, PrecursorInfo, ScanMode, SpectrumRecord,
+///     Activation, Analyzer, CollisionEnergyUnit, Polarity, PrecursorInfo, ScanMode,
+///     SpectrumRecord,
 /// };
 ///
 /// let precursor = PrecursorInfo::default()
@@ -178,8 +180,7 @@ impl ScanWindow {
 ///     .with_selected_mz(445.1201)
 ///     .with_isolation_width(1.6)
 ///     .with_charge(2)
-///     .with_collision_energy(30.0)
-///     .with_ce_is_nce(true)
+///     .with_collision_energy(30.0, CollisionEnergyUnit::Nce)
 ///     .with_activation(Activation::HCD)
 ///     .with_precursor_native_id("controllerType=0 controllerNumber=1 scan=41".to_string());
 ///
@@ -571,16 +572,37 @@ macro_rules! push_warning {
 }
 push_warning!(SpectrumRecord, ChromatogramRecord, RunMetadata);
 
+/// One collision energy and its unit.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct CollisionEnergy {
+    /// The energy.
+    pub value: f64,
+    /// Its unit; `None` when the reader does not know.
+    pub unit: Option<CollisionEnergyUnit>,
+}
+
+impl CollisionEnergy {
+    /// An energy of `value` in `unit` (`None` if unknown).
+    pub fn new(value: f64, unit: impl Into<Option<CollisionEnergyUnit>>) -> Self {
+        Self {
+            value,
+            unit: unit.into(),
+        }
+    }
+}
+
 impl PrecursorInfo {
-    /// Shorthand for readers that know the unit: normalized collision
-    /// energy (`true`) or electronvolts (`false`).
+    /// Append one collision energy. Pass the unit the source states, or
+    /// `None` when it does not say; there is no default.
     #[must_use]
-    pub fn with_ce_is_nce(mut self, is_nce: bool) -> Self {
-        self.collision_energy_unit = Some(if is_nce {
-            CollisionEnergyUnit::Nce
-        } else {
-            CollisionEnergyUnit::Ev
-        });
+    pub fn with_collision_energy(
+        mut self,
+        value: f64,
+        unit: impl Into<Option<CollisionEnergyUnit>>,
+    ) -> Self {
+        self.collision_energies
+            .push(CollisionEnergy::new(value, unit));
         self
     }
 }
@@ -591,8 +613,7 @@ setters!(PrecursorInfo {
     opt with_isolation_width isolation_width: f64,
     opt with_charge charge: i32,
     opt with_intensity intensity: f64,
-    opt with_collision_energy collision_energy: f64,
-    opt with_collision_energy_unit collision_energy_unit: CollisionEnergyUnit,
+    val with_collision_energies collision_energies: Vec<CollisionEnergy>,
     opt with_precursor_native_id precursor_native_id: String,
     opt with_activation activation: Activation,
     opt with_analyzer analyzer: Analyzer,

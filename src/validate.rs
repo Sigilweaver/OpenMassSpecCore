@@ -112,7 +112,9 @@ fn check_precursor(p: &PrecursorInfo) -> Result<(), RecordProblem> {
     finite_opt("precursor.selected_mz", p.selected_mz)?;
     finite_opt("precursor.isolation_width", p.isolation_width)?;
     finite_opt("precursor.intensity", p.intensity)?;
-    finite_opt("precursor.collision_energy", p.collision_energy)?;
+    for (i, ce) in p.collision_energies.iter().enumerate() {
+        finite_with(|| format!("precursor.collision_energies[{i}]"), ce.value)?;
+    }
     finite_opt("precursor.ccs", p.ccs)?;
     if p.selected_mz.is_none() {
         for (field, set) in [

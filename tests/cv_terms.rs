@@ -330,8 +330,14 @@ impl SpectrumSource for EveryPath {
                                 .with_charge(2)
                                 .with_intensity(10.0)
                                 .with_ccs(300.0)
-                                .with_collision_energy(30.0)
-                                .with_ce_is_nce(j == 0)
+                                .with_collision_energy(
+                                    30.0,
+                                    if j == 0 {
+                                        openmassspec_core::CollisionEnergyUnit::Nce
+                                    } else {
+                                        openmassspec_core::CollisionEnergyUnit::Ev
+                                    },
+                                )
                                 .with_activation(act)
                                 .with_analyzer(analyzer),
                         )

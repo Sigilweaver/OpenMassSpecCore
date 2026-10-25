@@ -66,8 +66,10 @@ impl Source {
                     Some(
                         PrecursorInfo::default()
                             .with_selected_mz(150.0)
-                            .with_collision_energy(30.0)
-                            .with_ce_is_nce(true),
+                            .with_collision_energy(
+                                30.0,
+                                openmassspec_core::CollisionEnergyUnit::Nce,
+                            ),
                     ),
                 ),
             ],

@@ -245,9 +245,11 @@ impl SpectrumBatchBuilder {
                 self.precursor_charge.append_option(p.charge);
                 self.precursor_intensity.append_option(p.intensity);
                 self.precursor_collision_energy
-                    .append_option(p.collision_energy);
+                    .append_option(p.collision_energies.first().map(|ce| ce.value));
                 self.precursor_ce_is_nce.append_option(
-                    p.collision_energy_unit
+                    p.collision_energies
+                        .first()
+                        .and_then(|ce| ce.unit)
                         .map(|u| u8::from(u == openmassspec_core::CollisionEnergyUnit::Nce)),
                 );
                 self.precursor_native_id
