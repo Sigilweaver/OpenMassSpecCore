@@ -1498,7 +1498,7 @@ fn write_spectrum<W: Write>(
         Some(ScanMode::Profile) => cv_param(out, I, cv::PROFILE_SPECTRUM, "")?,
         // The caller checked the leniency; the warning is written with the
         // other userParams, below.
-        _ => debug_assert!(flags.omit_representation),
+        None => debug_assert!(flags.omit_representation),
     }
 
     match rec.polarity {

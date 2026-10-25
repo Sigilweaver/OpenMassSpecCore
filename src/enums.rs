@@ -26,7 +26,9 @@ pub enum Analyzer {
     /// Time-of-flight.
     #[serde(rename = "tof")]
     TOFMS,
-    /// Fourier-transform (Orbitrap, FT-ICR).
+    /// Fourier-transform (Orbitrap, FT-ICR). The mzML writer cannot tell
+    /// them apart and writes the Orbitrap term, so an FT-ICR run is labelled
+    /// Orbitrap until a variant that names the analyzer exists.
     #[serde(rename = "ftms")]
     FTMS,
     /// Magnetic sector.
