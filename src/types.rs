@@ -17,7 +17,10 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use crate::cv;
-use crate::enums::{Activation, Analyzer, MobilityArrayKind, Polarity, ScanMode};
+use crate::enums::{
+    Activation, Analyzer, CollisionEnergyUnit, MobilityArrayKind, Polarity, ScanMode,
+};
+use crate::warning::Warning;
 
 /// Generates builder setters: `KIND SETTER FIELD: TYPE`.
 ///
@@ -110,10 +113,12 @@ pub struct PrecursorInfo {
     pub charge: Option<i32>,
     /// Precursor intensity (when known).
     pub intensity: Option<f64>,
-    /// Collision energy. Interpretation depends on `ce_is_nce`.
+    /// Collision energy. Its unit is `collision_energy_unit`.
     pub collision_energy: Option<f64>,
-    /// `true` if `collision_energy` is normalized (NCE %); `false` for eV.
-    pub ce_is_nce: bool,
+    /// Unit of `collision_energy`. `None` means the reader does not know;
+    /// the mzML writer then rejects a record that has a collision energy
+    /// rather than guess eV.
+    pub collision_energy_unit: Option<CollisionEnergyUnit>,
     /// Native ID of the precursor scan when known. Vendors should populate
     /// this with the same string they will use as the `native_id` for that
     /// MS1 spectrum, so mzML `spectrumRef` lookups round-trip cleanly.
@@ -247,6 +252,10 @@ pub struct SpectrumRecord {
     /// when an IMS-resolved parser opts to preserve it. Length must equal
     /// `mz.len()` when present.
     pub inv_mobility_per_peak: Option<Vec<f32>>,
+    /// Warnings attached by the reader or by a lenient mode; see
+    /// [`Warning`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<Warning>,
     /// Namespaced reader-specific values. Keys use `<reader>.<field>`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, String>,
@@ -281,6 +290,7 @@ impl SpectrumRecord {
             mz: Vec::new(),
             intensity: Vec::new(),
             inv_mobility_per_peak: None,
+            warnings: Vec::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -360,6 +370,10 @@ pub struct ChromatogramRecord {
     pub time_sec: Vec<f32>,
     /// Intensities, parallel to `time_sec`.
     pub intensity: Vec<f32>,
+    /// Warnings attached by the reader or by a lenient mode; see
+    /// [`Warning`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<Warning>,
 }
 
 impl ChromatogramRecord {
@@ -379,6 +393,7 @@ impl ChromatogramRecord {
             product_mz: None,
             time_sec,
             intensity,
+            warnings: Vec::new(),
         }
     }
 }
@@ -446,6 +461,10 @@ pub struct RunMetadata {
     /// a Fusion) preserve per-scan analyzer identity. When empty, every
     /// spectrum references the single default `IC1`.
     pub analyzers: Vec<Analyzer>,
+    /// Warnings attached by the reader or by a lenient mode; see
+    /// [`Warning`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<Warning>,
     /// Namespaced reader-specific values. Keys use `<reader>.<field>`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, String>,
@@ -475,6 +494,7 @@ impl RunMetadata {
             start_timestamp: None,
             mobility_array_kind: None,
             analyzers: Vec::new(),
+            warnings: Vec::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -513,6 +533,34 @@ setters!(SpectrumRecord {
     val with_extra_map extra: BTreeMap<String, String>,
 });
 
+macro_rules! push_warning {
+    ($($ty:ident),+) => {$(
+        impl $ty {
+            /// Append one [`Warning`].
+            #[must_use]
+            pub fn with_warning(mut self, warning: Warning) -> Self {
+                self.warnings.push(warning);
+                self
+            }
+        }
+    )+};
+}
+push_warning!(SpectrumRecord, ChromatogramRecord, RunMetadata);
+
+impl PrecursorInfo {
+    /// Shorthand for readers that know the unit: normalized collision
+    /// energy (`true`) or electronvolts (`false`).
+    #[must_use]
+    pub fn with_ce_is_nce(mut self, is_nce: bool) -> Self {
+        self.collision_energy_unit = Some(if is_nce {
+            CollisionEnergyUnit::Nce
+        } else {
+            CollisionEnergyUnit::Ev
+        });
+        self
+    }
+}
+
 setters!(PrecursorInfo {
     opt with_target_mz target_mz: f64,
     opt with_selected_mz selected_mz: f64,
@@ -520,7 +568,7 @@ setters!(PrecursorInfo {
     opt with_charge charge: i32,
     opt with_intensity intensity: f64,
     opt with_collision_energy collision_energy: f64,
-    val with_ce_is_nce ce_is_nce: bool,
+    opt with_collision_energy_unit collision_energy_unit: CollisionEnergyUnit,
     opt with_precursor_native_id precursor_native_id: String,
     opt with_activation activation: Activation,
     opt with_analyzer analyzer: Analyzer,
@@ -535,6 +583,7 @@ setters!(ChromatogramRecord {
     opt with_product_mz product_mz: f64,
     val with_time_sec time_sec: Vec<f32>,
     val with_intensity intensity: Vec<f32>,
+    val with_warnings warnings: Vec<Warning>,
 });
 
 setters!(RunMetadata {
@@ -550,6 +599,7 @@ setters!(RunMetadata {
     opt with_start_timestamp start_timestamp: String,
     opt with_mobility_array_kind mobility_array_kind: MobilityArrayKind,
     val with_analyzers analyzers: Vec<Analyzer>,
+    val with_warnings warnings: Vec<Warning>,
     val with_extra_map extra: BTreeMap<String, String>,
 });
 

@@ -11,10 +11,11 @@
 use crate::cv;
 use crate::enums::ScanMode;
 use crate::error::{Error, RecordProblem, Result};
-use crate::mzml::ScanModePolicy;
+use crate::leniency::{Check, Leniency};
 use crate::source::{ChromatogramIter, SpectrumIter, SpectrumSource};
 use crate::types::{CvTerm, RunMetadata, SpectrumRecord};
 use crate::validate;
+use crate::warning::{Warning, WarningKind};
 
 /// Relative median m/z spacing above which a spectrum labelled profile is
 /// taken to be a peak list (0.5 percent of m/z, i.e. 5000 ppm). Profile
@@ -31,9 +32,9 @@ const NEIGHBOR_SPACING_FACTOR: f64 = 3.0;
 ///
 /// A spectrum with no declared scan mode is a record error
 /// ([`RecordProblem::UnknownScanMode`]) unless
-/// [`with_unknown_scan_mode`](Centroided::with_unknown_scan_mode) selects
-/// [`ScanModePolicy::Omit`], which passes it through untouched and marks it
-/// with an `openmassspec.centroid` entry in `extra`. A spectrum declared
+/// [`with_leniency`](Centroided::with_leniency) allows
+/// [`Check::UnknownScanMode`], which passes it through untouched with a
+/// [`WarningKind::CentroidNotApplied`] warning. A spectrum declared
 /// profile whose points are too sparse to be profile data is a record error
 /// ([`RecordProblem::NotProfile`]). Peak weighting only joins neighbours
 /// that sit within a few median sample spacings, so gaps in a
@@ -41,7 +42,7 @@ const NEIGHBOR_SPACING_FACTOR: f64 = 3.0;
 pub struct Centroided<S: SpectrumSource> {
     inner: S,
     min_intensity: f32,
-    unknown_scan_mode: ScanModePolicy,
+    leniency: Leniency,
 }
 
 impl<S: SpectrumSource> Centroided<S> {
@@ -50,7 +51,7 @@ impl<S: SpectrumSource> Centroided<S> {
         Self {
             inner,
             min_intensity: 0.0,
-            unknown_scan_mode: ScanModePolicy::Require,
+            leniency: Leniency::strict(),
         }
     }
 
@@ -60,9 +61,9 @@ impl<S: SpectrumSource> Centroided<S> {
         self
     }
 
-    /// What to do with a spectrum whose `scan_mode` is `None`.
-    pub fn with_unknown_scan_mode(mut self, policy: ScanModePolicy) -> Self {
-        self.unknown_scan_mode = policy;
+    /// Checks that may continue with a warning instead of failing.
+    pub fn with_leniency(mut self, leniency: Leniency) -> Self {
+        self.leniency = leniency;
         self
     }
 }
@@ -75,11 +76,11 @@ impl<S: SpectrumSource> SpectrumSource for Centroided<S> {
     /// Errors from the wrapped source pass through unchanged.
     fn iter_spectra<'a>(&'a mut self) -> SpectrumIter<'a> {
         let min_intensity = self.min_intensity;
-        let policy = self.unknown_scan_mode;
+        let leniency = self.leniency.clone();
         Box::new(
             self.inner
                 .iter_spectra()
-                .map(move |rec| rec.and_then(|rec| centroid_record(rec, min_intensity, policy))),
+                .map(move |rec| rec.and_then(|rec| centroid_record(rec, min_intensity, &leniency))),
         )
     }
 
@@ -108,23 +109,21 @@ fn record_error(rec: &SpectrumRecord, problem: RecordProblem) -> Error {
 fn centroid_record(
     mut rec: SpectrumRecord,
     min_intensity: f32,
-    unknown: ScanModePolicy,
+    leniency: &Leniency,
 ) -> Result<SpectrumRecord> {
     match rec.scan_mode {
         Some(ScanMode::Centroid) => return Ok(rec),
         Some(ScanMode::Profile) => {}
-        _ => match unknown {
-            ScanModePolicy::Require => {
-                return Err(record_error(&rec, RecordProblem::UnknownScanMode))
+        _ => {
+            if !leniency.allows(Check::UnknownScanMode) {
+                return Err(record_error(&rec, RecordProblem::UnknownScanMode));
             }
-            ScanModePolicy::Omit => {
-                rec.extra.insert(
-                    "openmassspec.centroid".into(),
-                    "not applied: scan mode unknown".into(),
-                );
-                return Ok(rec);
-            }
-        },
+            rec.warnings.push(Warning::new(
+                WarningKind::CentroidNotApplied,
+                "scan mode unknown: left as read, not centroided",
+            ));
+            return Ok(rec);
+        }
     }
 
     validate::check_array_lengths(&rec).map_err(|p| record_error(&rec, p))?;
@@ -272,6 +271,7 @@ mod tests {
                     start_timestamp: None,
                     mobility_array_kind: None,
                     analyzers: Vec::new(),
+                    warnings: Vec::new(),
                     extra: Default::default(),
                 },
                 rec: Some(rec),
@@ -333,6 +333,7 @@ mod tests {
             mz,
             intensity,
             inv_mobility_per_peak: None,
+            warnings: Vec::new(),
             extra: Default::default(),
         }
     }
@@ -448,8 +449,8 @@ mod tests {
         assert!(err.to_string().contains("truncated scan"), "{err}");
     }
 
-    fn centroid_one(rec: SpectrumRecord, policy: ScanModePolicy) -> crate::Result<SpectrumRecord> {
-        let mut src = Centroided::new(OneSpectrumSource::new(rec)).with_unknown_scan_mode(policy);
+    fn centroid_one(rec: SpectrumRecord, leniency: Leniency) -> crate::Result<SpectrumRecord> {
+        let mut src = Centroided::new(OneSpectrumSource::new(rec)).with_leniency(leniency);
         let mut out: Vec<_> = src.iter_spectra().collect();
         out.remove(0)
     }
@@ -466,7 +467,7 @@ mod tests {
         let mut rec = profile_spectrum();
         rec.scan_mode = None;
         assert_eq!(
-            problem(centroid_one(rec, ScanModePolicy::Require)),
+            problem(centroid_one(rec, Leniency::strict())),
             RecordProblem::UnknownScanMode
         );
     }
@@ -476,13 +477,11 @@ mod tests {
         let mut rec = profile_spectrum();
         rec.scan_mode = None;
         let original = rec.mz.clone();
-        let out = centroid_one(rec, ScanModePolicy::Omit).unwrap();
+        let out = centroid_one(rec, Leniency::strict().with(Check::UnknownScanMode)).unwrap();
         assert_eq!(out.mz, original);
         assert_eq!(out.scan_mode, None);
-        assert_eq!(
-            out.extra.get("openmassspec.centroid").map(String::as_str),
-            Some("not applied: scan mode unknown")
-        );
+        assert_eq!(out.warnings.len(), 1);
+        assert_eq!(out.warnings[0].kind, WarningKind::CentroidNotApplied);
     }
 
     #[test]
@@ -492,7 +491,7 @@ mod tests {
         let mut rec = profile_spectrum();
         rec.mz = vec![150.0, 480.0, 910.0, 1500.0, 2400.0, 3100.0];
         rec.intensity = vec![5.0, 90.0, 20.0, 60.0, 10.0, 40.0];
-        let p = problem(centroid_one(rec, ScanModePolicy::Require));
+        let p = problem(centroid_one(rec, Leniency::strict()));
         assert!(matches!(p, RecordProblem::NotProfile { .. }), "{p:?}");
     }
 
@@ -507,7 +506,7 @@ mod tests {
             700.000, // isolated point
         ];
         rec.intensity = vec![1.0, 5.0, 10.0, 5.0, 1.0, 1.0, 4.0, 8.0, 4.0, 1.0, 3.0];
-        let out = centroid_one(rec, ScanModePolicy::Require).unwrap();
+        let out = centroid_one(rec, Leniency::strict()).unwrap();
         assert_eq!(out.mz.len(), 3, "{:?}", out.mz);
         assert!((out.mz[0] - 500.002).abs() < 0.0015);
         assert!((out.mz[1] - 600.002).abs() < 0.0015);
@@ -520,7 +519,7 @@ mod tests {
         let mut rec = profile_spectrum();
         rec.intensity.push(1.0);
         assert!(matches!(
-            problem(centroid_one(rec, ScanModePolicy::Require)),
+            problem(centroid_one(rec, Leniency::strict())),
             RecordProblem::ArrayLengthMismatch { .. }
         ));
     }

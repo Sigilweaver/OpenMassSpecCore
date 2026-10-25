@@ -38,6 +38,7 @@ pub enum Error {
     /// A spectrum or chromatogram record failed the writer's checks. The
     /// record is identified by its native id (or chromatogram id).
     #[error("invalid record {record_id:?}: {problem}")]
+    #[non_exhaustive]
     Record {
         /// `native_id` of the spectrum, or `id` of the chromatogram.
         record_id: String,
@@ -53,6 +54,7 @@ pub enum Error {
 pub enum RecordProblem {
     /// Two parallel arrays have different lengths.
     #[error("{array} array has {found} values, expected {expected} (length of {reference})")]
+    #[non_exhaustive]
     ArrayLengthMismatch {
         /// The array whose length is wrong.
         array: &'static str,
@@ -65,6 +67,7 @@ pub enum RecordProblem {
     },
     /// A float field or array value is NaN or infinite.
     #[error("{field} is not finite ({value})")]
+    #[non_exhaustive]
     NonFinite {
         /// Field name, with `[i]` for an array element.
         field: String,
@@ -73,6 +76,7 @@ pub enum RecordProblem {
     },
     /// The m/z array is not in ascending order.
     #[error("m/z array is not ascending at index {index} ({previous} then {value})")]
+    #[non_exhaustive]
     UnsortedMz {
         /// Index of the first value that is smaller than its predecessor.
         index: usize,
@@ -86,6 +90,7 @@ pub enum RecordProblem {
     DuplicateId,
     /// A precursor `spectrumRef` names a spectrum that is not in the output.
     #[error("precursor references spectrum {reference:?}, which is not in the output")]
+    #[non_exhaustive]
     DanglingPrecursorRef {
         /// The referenced native id.
         reference: String,
@@ -98,14 +103,19 @@ pub enum RecordProblem {
         "labelled profile but looks like a peak list \
          (median m/z spacing {median_spacing:.4} is {relative_ppm:.0} ppm of the m/z)"
     )]
+    #[non_exhaustive]
     NotProfile {
         /// Median distance between consecutive m/z values.
         median_spacing: f64,
         /// That distance relative to the median m/z, in parts per million.
         relative_ppm: f64,
     },
+    /// A collision energy is present but its unit is not known.
+    #[error("collision energy is set but its unit (eV or NCE) is not known")]
+    CollisionEnergyUnitUnknown,
     /// Charge, intensity or CCS is set but the selected-ion m/z is not.
     #[error("precursor has {field} but no selected-ion m/z")]
+    #[non_exhaustive]
     PrecursorWithoutSelectedMz {
         /// Which field is set.
         field: &'static str,

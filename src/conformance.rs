@@ -422,6 +422,7 @@ mod tests {
             mz,
             intensity,
             inv_mobility_per_peak: None,
+            warnings: Vec::new(),
             extra: Default::default(),
         }
     }

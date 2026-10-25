@@ -6,6 +6,25 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### API breaks
+
+- `PrecursorInfo::ce_is_nce: bool` is replaced by
+  `collision_energy_unit: Option<CollisionEnergyUnit>` (`Ev`, `Nce`). `None`
+  means the reader does not know; the writer rejects a precursor that has a
+  collision energy and no unit instead of writing eV
+  (`RecordProblem::CollisionEnergyUnitUnknown`). `with_ce_is_nce(bool)` stays
+  as shorthand for `with_collision_energy_unit(Nce or Ev)`. The Arrow
+  `precursor_ce_is_nce` column is null when the unit is unknown.
+- Serde and `as_str` use the same labels for `Polarity`, `ScanMode`,
+  `Analyzer`, `Activation` and `MobilityArrayKind`: `"positive"`,
+  `"centroid"`, `"tof"`, `"hcd"`, `"inverse_reduced_k0"`, ... They
+  serialized as the Rust variant names (`"Positive"`, `"TOFMS"`). Each enum
+  has `FromStr`; an unknown label is an error (`ParseLabelError`).
+- `WriteSummary` is no longer `Copy` or `Eq`, and `WriteOptions` is no
+  longer `Eq`.
+- `Error::Record` and the struct variants of `RecordProblem` are
+  `#[non_exhaustive]`.
+
 ### Behavior changes
 
 Files that convert today can fail or read differently:
@@ -16,33 +35,27 @@ Files that convert today can fail or read differently:
   `inv_mobility_per_peak` not the length of `mz` (the mobility array used to
   be dropped silently); NaN or infinite values in any float field or array;
   an `mz` array that is not ascending; a native id (or chromatogram id)
-  already written; a
-  precursor with charge, intensity or CCS but no selected-ion m/z; a
-  precursor `spectrumRef` naming a spectrum that is not in the output; and
+  already written; a precursor with charge, intensity or CCS but no
+  selected-ion m/z; a collision energy with no unit; a precursor
+  `spectrumRef` naming a spectrum that is not in the output; and
   spectrum-level `inv_mobility` when `mobility_array_kind` is
   `DriftTimeMilliseconds`. With `RecordErrorPolicy::Skip` a rejected record
-  is left out and counted in `WriteSummary::spectra_skipped` and
-  `spectra_invalid` (`chromatograms_invalid`); a dangling `spectrumRef` is
-  instead dropped from the precursor, marked, and counted in
-  `dangling_precursor_refs`.
+  is left out, counted in `WriteSummary::spectra_skipped` and
+  `spectra_invalid` (`chromatograms_invalid`), and its cause is kept in
+  `WriteSummary::issues` (at most `WriteOptions::max_reported_issues`).
 - A spectrum whose `analyzer` is missing from `RunMetadata::analyzers` gets
   its own `instrumentConfiguration` (it used to get none and inherit `IC1`).
   The writer now writes the document head after it has read the spectra, so
   when a write fails, `out` holds no head and no partial `<spectrumList>`.
 - A spectrum with `scan_mode: None` is a record error
   (`RecordProblem::UnknownScanMode`) that stops the write even under
-  `RecordErrorPolicy::Skip`. It used to be written as "profile spectrum". `WriteOptions::with_scan_mode_policy(ScanModePolicy::Omit)`
-  writes it with no profile/centroid term and an
-  `openmassspec: spectrum representation` userParam of `unknown`, and counts
-  it in `WriteSummary::spectra_unknown_scan_mode`.
+  `RecordErrorPolicy::Skip`. It used to be written as "profile spectrum".
 - `Centroided` picks peaks only from spectra declared `ScanMode::Profile`.
-  `scan_mode: None` is a record error, or with
-  `Centroided::with_unknown_scan_mode(ScanModePolicy::Omit)` passes through
-  unchanged with `extra["openmassspec.centroid"] = "not applied: scan mode unknown"`.
-  A "profile" spectrum whose median m/z spacing exceeds 0.5 percent of m/z
-  is a peak list and is a record error (`RecordProblem::NotProfile`). Peak
-  weighting joins neighbours only within three median sample spacings, so
-  gaps in zero-stripped profile data are no longer averaged across.
+  `scan_mode: None` is a record error. A "profile" spectrum whose median m/z
+  spacing exceeds 0.5 percent of m/z is a peak list and is a record error
+  (`RecordProblem::NotProfile`). Peak weighting joins neighbours only within
+  three median sample spacings, so gaps in zero-stripped profile data are
+  no longer averaged across.
 - `Activation::CID` is always written as collision-induced dissociation
   (MS:1000133). It used to become beam-type CID (MS:1000422) when the
   analyzer was FTMS; readers that know a scan is beam-type send
@@ -55,21 +68,30 @@ Files that convert today can fail or read differently:
 - Precursors with `Activation::PD` or no activation carry an
   `openmassspec: activation` userParam (`pd` or `unknown`) in
   `<activation>`.
+- `SpectrumRecord::effective_base_peak` reports a NaN intensity instead of
+  ignoring it when it is the first value.
 
 ### Added
 
-- `Error::Record`, `RecordProblem`, `ScanModePolicy`,
-  `WriteOptions::scan_mode_policy`, `Centroided::with_unknown_scan_mode`.
+- `Warning` and `WarningKind` (with `Other(code)` for reader-defined kinds),
+  and a `warnings` field on `SpectrumRecord`, `ChromatogramRecord` and
+  `RunMetadata` (`with_warnings`, `with_warning`). The writer emits each as
+  `<userParam name="openmassspec: warning CODE" value="MESSAGE"/>` and
+  counts them per code in `WriteSummary::warning_counts`.
+- `Leniency` and `Check` (`UnknownScanMode`, `DanglingPrecursorRef`):
+  `WriteOptions::with_leniency` and `Centroided::with_leniency` let the
+  named checks continue instead of failing. Each affected record gets a
+  `Warning`: a spectrum of unknown scan mode is written with no
+  profile/centroid term (or left unchanged by `Centroided`), and a dangling
+  precursor `spectrumRef` is dropped. Check names (`as_str`, `FromStr`) are
+  what command lines and Python keywords accept.
+- `WriteSummary::issues` (`WriteIssue`, `RecordKind`), `issues_truncated`,
+  `warning_counts`, `spectrum_count_mismatch` (source count hint differs from
+  spectra written plus skipped), `spectra_invalid`, `chromatograms_invalid`,
+  and `WriteSummary::has_warnings`; `WriteOptions::max_reported_issues`.
+- `Error::Record`, `RecordProblem`.
 - `SpectrumRecord::scan_window` and `with_scan_window`.
-- `WriteSummary` fields `spectra_invalid`, `chromatograms_invalid`,
-  `spectra_unknown_scan_mode`, `dangling_precursor_refs`,
-  `spectrum_count_mismatch` (source count hint differs from spectra written
-  plus skipped), and `WriteSummary::has_warnings`.
-
-### Fixed
-
-- `SpectrumRecord::effective_base_peak` reports a NaN intensity instead of
-  ignoring it when it is the first value.
+- `CollisionEnergyUnit`, `ParseLabelError`.
 
 ## [3.0.0] - 2026-10-11
 
