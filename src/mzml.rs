@@ -594,6 +594,8 @@ pub struct WriteIssue {
     pub record_id: Option<String>,
     /// The error, as text.
     pub cause: String,
+    /// The typed cause, when the writer (not the source) rejected the record.
+    pub problem: Option<RecordProblem>,
 }
 
 /// What a successful write produced.
@@ -626,12 +628,23 @@ pub struct WriteSummary {
     /// code, from the reader and from lenient writing. Empty when nothing
     /// was flagged.
     pub warning_counts: std::collections::BTreeMap<String, usize>,
-    /// `Some((hint, accounted))` when the source announced a
-    /// [`SpectrumSource::spectrum_count_hint`] larger than
-    /// `spectra_written + spectra_skipped`. A skipped `Err` can stand for
-    /// several spectra and a source may end early after an `Err`, so spectra
+    /// Set when the source announced a [`SpectrumSource::spectrum_count_hint`]
+    /// larger than `spectra_written + spectra_skipped` and
+    /// `Check::SpectrumCountShortfall` allowed the write to continue
+    /// (otherwise it is [`Error::SpectrumCountShortfall`]). A skipped `Err`
+    /// can stand for several spectra and a source may end early, so spectra
     /// may be unaccounted for.
-    pub spectrum_count_mismatch: Option<(usize, usize)>,
+    pub spectrum_count_mismatch: Option<CountMismatch>,
+}
+
+/// A source announced more spectra than were written or skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CountMismatch {
+    /// The source's `spectrum_count_hint`.
+    pub announced: usize,
+    /// Spectra written plus spectra skipped.
+    pub accounted: usize,
 }
 
 impl WriteSummary {
@@ -848,6 +861,7 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
     let mut summary = WriteSummary::default();
     let mut spectrum_offsets = Vec::new();
     let mut written_ids: HashSet<String> = HashSet::new();
+    let mut levels = SeenLevels::default();
     for (at, item) in src.iter_spectra().enumerate() {
         let rec = match item {
             Ok(rec) => rec,
@@ -861,6 +875,7 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
                         position: at,
                         record_id: None,
                         cause: e.to_string(),
+                        problem: None,
                     },
                 );
                 continue;
@@ -882,6 +897,7 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
                         position: at,
                         record_id: Some(rec.native_id.clone()),
                         cause: problem.to_string(),
+                        problem: Some(problem),
                     },
                 );
                 continue;
@@ -898,6 +914,11 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
                 let id = format!("IC{}", analyzer_ic_ids.len() + 2);
                 analyzer_ic_ids.push((a, id));
             }
+        }
+        if rec.ms_level == 1 {
+            levels.ms1 = true;
+        } else {
+            levels.msn = true;
         }
         summary.count_warnings(&rec.warnings);
         summary.count_warnings(&flags.warnings);
@@ -923,11 +944,26 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
         // Only fewer spectra than announced means data may be missing; a
         // source that announces fewer than it yields has a wrong hint.
         if accounted < hint {
-            summary.spectrum_count_mismatch = Some((hint, accounted));
+            if !opts.leniency.allows(&Check::SpectrumCountShortfall) {
+                return Err(Error::SpectrumCountShortfall {
+                    announced: hint,
+                    accounted,
+                });
+            }
+            summary.spectrum_count_mismatch = Some(CountMismatch {
+                announced: hint,
+                accounted,
+            });
+            let warning = Warning::new(
+                WarningKind::SpectrumCountShortfall,
+                format!("the source announced {hint} spectra; {accounted} were written or skipped"),
+            );
+            summary.count_warnings(std::slice::from_ref(&warning));
+            meta.warnings.push(warning);
         }
     }
     meta.analyzers = analyzer_ic_ids.iter().map(|(a, _)| *a).collect();
-    write_prologue(cw, &meta, &ids, indexed, &extra_processing)?;
+    write_prologue(cw, &meta, &ids, indexed, &extra_processing, levels)?;
     writeln!(
         cw,
         r#"    <spectrumList count="{}" defaultDataProcessingRef="dp1">"#,
@@ -954,6 +990,7 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
                         position: at,
                         record_id: None,
                         cause: e.to_string(),
+                        problem: None,
                     },
                 );
                 continue;
@@ -981,6 +1018,7 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
                         position: at,
                         record_id: Some(rec.id.clone()),
                         cause: problem.to_string(),
+                        problem: Some(problem),
                     },
                 );
             }
@@ -1090,6 +1128,7 @@ fn write_prologue<W: Write>(
     ids: &DocumentIds,
     indexed: bool,
     extra_processing: &[CvTerm],
+    levels: SeenLevels,
 ) -> io::Result<()> {
     writeln!(out, r#"<?xml version="1.0" encoding="utf-8"?>"#)?;
     if indexed {
@@ -1139,8 +1178,13 @@ fn write_prologue<W: Write>(
 
     writeln!(out, r#"  <fileDescription>"#)?;
     writeln!(out, r#"    <fileContent>"#)?;
-    cv_param(out, "      ", cv::MS1_SPECTRUM, "")?;
-    cv_param(out, "      ", cv::MSN_SPECTRUM, "")?;
+    // Declare only the spectrum kinds that were written.
+    if levels.ms1 {
+        cv_param(out, "      ", cv::MS1_SPECTRUM, "")?;
+    }
+    if levels.msn {
+        cv_param(out, "      ", cv::MSN_SPECTRUM, "")?;
+    }
     writeln!(out, r#"    </fileContent>"#)?;
     writeln!(out, r#"    <sourceFileList count="1">"#)?;
     writeln!(
@@ -1289,6 +1333,13 @@ fn analyzer_ic_table(analyzers: &[Analyzer]) -> Vec<(Analyzer, String)> {
         .enumerate()
         .map(|(i, a)| (*a, format!("IC{}", i + 2)))
         .collect()
+}
+
+/// Which spectrum kinds were written, for `<fileContent>`.
+#[derive(Debug, Default, Clone, Copy)]
+struct SeenLevels {
+    ms1: bool,
+    msn: bool,
 }
 
 /// How [`write_spectrum`] must deviate from the record as given.
@@ -2739,7 +2790,8 @@ mod tests {
     }
 
     #[test]
-    fn spectrum_count_ignores_missing_or_wrong_hint() {
+    fn spectrum_count_ignores_a_missing_or_too_small_hint() {
+        // A hint of 99 is a shortfall; it is allowed explicitly here.
         for hint in [CountHint::None, CountHint::Fixed(1), CountHint::Fixed(99)] {
             let mut src = ToySource::new();
             src.spectra = (0..3)
@@ -2750,8 +2802,10 @@ mod tests {
                 })
                 .collect();
             src.count_hint = hint;
+            let opts = WriteOptions::new()
+                .with_leniency(Leniency::strict().with(Check::SpectrumCountShortfall));
             for indexed in [false, true] {
-                let buf = write_with(&mut src, &WriteOptions::new(), indexed);
+                let buf = write_with(&mut src, &opts, indexed);
                 assert_eq!(check_document(&buf, indexed), 3);
             }
         }
@@ -2761,7 +2815,7 @@ mod tests {
     fn empty_source_writes_zero_count() {
         let mut src = ToySource::new();
         src.spectra.clear();
-        src.count_hint = CountHint::Fixed(5);
+        src.count_hint = CountHint::Fixed(0);
         for indexed in [false, true] {
             let buf = write_with(&mut src, &WriteOptions::new(), indexed);
             assert_eq!(check_document(&buf, indexed), 0);
@@ -3415,12 +3469,29 @@ mod tests {
     fn count_hint_mismatch_is_reported_in_the_summary() {
         let mut src = ToySource::new();
         src.count_hint = CountHint::Fixed(5);
-        let summary = write_mzml(&mut src, &mut Vec::new()).unwrap();
-        assert_eq!(summary.spectrum_count_mismatch, Some((5, 1)));
+        // Strict: an unexplained shortfall is an error.
+        let err = write_mzml(&mut src, &mut Vec::new()).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::SpectrumCountShortfall {
+                announced: 5,
+                accounted: 1
+            }
+        ));
+        let lenient = WriteOptions::new()
+            .with_leniency(Leniency::strict().with(Check::SpectrumCountShortfall));
+        let mut buf = Vec::new();
+        let summary = write_mzml_with_options(&mut src, &mut buf, &lenient).unwrap();
+        let mismatch = summary.spectrum_count_mismatch.unwrap();
+        assert_eq!((mismatch.announced, mismatch.accounted), (5, 1));
         assert!(summary.has_warnings());
+        assert!(String::from_utf8(buf)
+            .unwrap()
+            .contains("openmassspec: warning spectrum_count_shortfall"));
         src.count_hint = CountHint::Len;
         let summary = write_mzml(&mut src, &mut Vec::new()).unwrap();
         assert_eq!(summary.spectrum_count_mismatch, None);
+        assert!(!summary.has_warnings());
         // A hint below the number yielded is a wrong hint, not lost data.
         src.count_hint = CountHint::Fixed(0);
         let summary = write_mzml(&mut src, &mut Vec::new()).unwrap();
@@ -3586,5 +3657,135 @@ mod tests {
         assert!(!s.contains("MS:1000016"));
         let (s, _) = write_one(two_peaks(), &WriteOptions::new()).unwrap();
         assert!(s.contains("MS:1000016"));
+    }
+
+    #[test]
+    fn file_content_declares_only_the_levels_written() {
+        let (s, _) = write_one(two_peaks(), &WriteOptions::new()).unwrap();
+        let head = &s[s.find("<fileContent>").unwrap()..s.find("</fileContent>").unwrap()];
+        assert!(
+            head.contains("MS:1000579") && !head.contains("MS:1000580"),
+            "{head}"
+        );
+        let mut ms2 = two_peaks();
+        ms2.ms_level = 2;
+        ms2.precursor = Some(crate::PrecursorInfo::default().with_target_mz(500.0));
+        let mut src = ToySource::new();
+        src.spectra = vec![two_peaks(), ms2];
+        src.spectra[1].native_id = "scan=2".into();
+        let mut buf = Vec::new();
+        write_mzml_with_options(
+            &mut src,
+            &mut buf,
+            &WriteOptions::new()
+                .with_leniency(Leniency::strict().with(Check::DanglingPrecursorRef)),
+        )
+        .unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        let head = &s[s.find("<fileContent>").unwrap()..s.find("</fileContent>").unwrap()];
+        assert!(
+            head.contains("MS:1000579") && head.contains("MS:1000580"),
+            "{head}"
+        );
+    }
+
+    #[test]
+    fn duplicate_chromatogram_ids_are_errors() {
+        let mut src = ToySource::new();
+        src.chroms = vec![tic_chromatogram(0), tic_chromatogram(1)];
+        let err = write_mzml(&mut src, &mut Vec::new()).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Record {
+                problem: RecordProblem::DuplicateId,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn non_finite_precursor_fields_are_errors() {
+        let mut rec = minimal_spectrum(0, None);
+        rec.ms_level = 2;
+        rec.precursor = Some(
+            crate::PrecursorInfo::default()
+                .with_selected_mz(f64::NAN)
+                .with_collision_energy(30.0, CollisionEnergyUnit::Nce),
+        );
+        assert!(matches!(
+            problem_of(write_one(rec, &WriteOptions::new())),
+            RecordProblem::NonFinite { .. }
+        ));
+        let mut rec = minimal_spectrum(0, None);
+        rec.ms_level = 2;
+        rec.precursor = Some(
+            crate::PrecursorInfo::default()
+                .with_selected_mz(500.0)
+                .with_collision_energy(f64::INFINITY, CollisionEnergyUnit::Nce),
+        );
+        assert!(matches!(
+            problem_of(write_one(rec, &WriteOptions::new())),
+            RecordProblem::NonFinite { .. }
+        ));
+    }
+
+    #[test]
+    fn ms_level_zero_is_an_error() {
+        let mut rec = two_peaks();
+        rec.ms_level = 0;
+        assert_eq!(
+            problem_of(write_one(rec, &WriteOptions::new())),
+            RecordProblem::MsLevelZero
+        );
+    }
+
+    #[test]
+    fn all_leniency_writes_through_the_indexed_writer_with_every_flag() {
+        let mut src = ToySource::new();
+        let mut ms2 = minimal_spectrum(1, None);
+        ms2.scan_mode = None;
+        ms2.ms_level = 2;
+        ms2.precursor = Some(
+            crate::PrecursorInfo::default()
+                .with_selected_mz(500.0)
+                .with_collision_energy(30.0, None)
+                .with_precursor_native_id("scan=missing".to_string()),
+        );
+        src.spectra = vec![ms2];
+        src.count_hint = CountHint::Fixed(3);
+        let mut buf = Vec::new();
+        let summary = write_indexed_mzml_with_options(
+            &mut src,
+            &mut buf,
+            &WriteOptions::new().with_leniency(Leniency::all()),
+        )
+        .unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        for code in [
+            "unknown_scan_mode",
+            "dangling_precursor_ref",
+            "unknown_collision_energy_unit",
+            "spectrum_count_shortfall",
+        ] {
+            assert!(
+                summary.warning_counts.contains_key(code),
+                "missing {code}: {:?}",
+                summary.warning_counts
+            );
+        }
+        assert!(s.contains("<indexList"));
+        assert_eq!(s.matches("<offset ").count(), 1);
+    }
+
+    #[test]
+    fn skip_policy_records_the_typed_cause() {
+        let mut src = ToySource::new();
+        src.spectra = vec![two_peaks().with_scan_window(5.0, 1.0)];
+        let opts = WriteOptions::new().with_record_error_policy(RecordErrorPolicy::Skip);
+        let summary = write_mzml_with_options(&mut src, &mut Vec::new(), &opts).unwrap();
+        assert!(matches!(
+            summary.issues[0].problem,
+            Some(RecordProblem::InvalidScanWindow { .. })
+        ));
     }
 }

@@ -126,7 +126,9 @@ fn centroid_record(
         }
     }
 
-    validate::check_array_lengths(&rec).map_err(|p| record_error(&rec, p))?;
+    // NaN intensities and unsorted m/z would make the peak comparisons and
+    // the spacing bound meaningless, so run the writer's checks first.
+    validate::check_spectrum(&rec).map_err(|p| record_error(&rec, p))?;
     if let Some((spacing, relative)) = validate::median_spacing(&rec.mz) {
         if relative > PEAK_LIST_RELATIVE_SPACING {
             return Err(record_error(
@@ -522,5 +524,34 @@ mod tests {
             problem(centroid_one(rec, Leniency::strict())),
             RecordProblem::ArrayLengthMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn nan_intensity_and_unsorted_mz_are_errors_not_guesses() {
+        let mut nan = profile_spectrum();
+        nan.intensity[3] = f32::NAN;
+        assert!(matches!(
+            problem(centroid_one(nan, Leniency::strict())),
+            RecordProblem::NonFinite { .. }
+        ));
+        let mut unsorted = profile_spectrum();
+        unsorted.mz.swap(1, 2);
+        assert!(matches!(
+            problem(centroid_one(unsorted, Leniency::strict())),
+            RecordProblem::UnsortedMz { .. }
+        ));
+    }
+
+    #[test]
+    fn not_profile_is_skipped_and_counted_by_the_writer() {
+        let mut rec = profile_spectrum();
+        rec.mz = vec![150.0, 480.0, 910.0, 1500.0];
+        rec.intensity = vec![5.0, 90.0, 20.0, 60.0];
+        let mut src = Centroided::new(OneSpectrumSource::new(rec));
+        let opts =
+            crate::WriteOptions::new().with_record_error_policy(crate::RecordErrorPolicy::Skip);
+        let summary = crate::write_mzml_with_options(&mut src, &mut Vec::new(), &opts).unwrap();
+        assert_eq!(summary.spectra_skipped, 1);
+        assert!(summary.issues[0].cause.contains("peak list"));
     }
 }

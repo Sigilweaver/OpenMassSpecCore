@@ -51,7 +51,7 @@ pub use error::{Error, RecordProblem, Result};
 pub use leniency::{Check, Leniency, UnknownCheck};
 pub use mzml::{
     write_indexed_mzml, write_indexed_mzml_with_options, write_mzml, write_mzml_with_options,
-    RecordErrorPolicy, WriteIssue, WriteOptions, WriteSummary,
+    CountMismatch, RecordErrorPolicy, RecordKind, WriteIssue, WriteOptions, WriteSummary,
 };
 pub use source::{ChromatogramIter, SpectrumIter, SpectrumSource};
 pub use types::{

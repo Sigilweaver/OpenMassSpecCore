@@ -30,6 +30,8 @@ pub enum WarningKind {
     /// The precursor has a collision energy whose unit the reader did not
     /// state; it was written without a unit.
     UnknownCollisionEnergyUnit,
+    /// The source announced more spectra than were written or skipped.
+    SpectrumCountShortfall,
     /// A code defined by a reader crate or a newer Core.
     Other(Cow<'static, str>),
 }
@@ -42,6 +44,7 @@ impl WarningKind {
             Self::DanglingPrecursorRef => "dangling_precursor_ref",
             Self::CentroidNotApplied => "centroid_not_applied",
             Self::UnknownCollisionEnergyUnit => "unknown_collision_energy_unit",
+            Self::SpectrumCountShortfall => "spectrum_count_shortfall",
             Self::Other(code) => code,
         }
     }
@@ -55,6 +58,7 @@ impl WarningKind {
             "dangling_precursor_ref" => Self::DanglingPrecursorRef,
             "centroid_not_applied" => Self::CentroidNotApplied,
             "unknown_collision_energy_unit" => Self::UnknownCollisionEnergyUnit,
+            "spectrum_count_shortfall" => Self::SpectrumCountShortfall,
             other => Self::Other(Cow::Owned(other.to_string())),
         }
     }

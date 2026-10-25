@@ -102,6 +102,16 @@ pub enum ConformanceError {
     /// Spectrum had no peaks at all.
     #[non_exhaustive]
     EmptySpectrum { native_id: String },
+    /// The record fails [`SpectrumRecord::validate`] (non-finite values,
+    /// unsorted m/z, invalid scan windows, ...).
+    #[non_exhaustive]
+    InvalidRecord {
+        native_id: String,
+        problem: crate::RecordProblem,
+    },
+    /// Two spectra share a native id.
+    #[non_exhaustive]
+    DuplicateNativeId { native_id: String },
 }
 
 impl std::fmt::Display for ConformanceError {
@@ -166,6 +176,10 @@ impl std::fmt::Display for ConformanceError {
                 "{native_id}: index sequence broken (prev={previous:?}, current={current})"
             ),
             Self::EmptySpectrum { native_id } => write!(f, "{native_id}: empty spectrum"),
+            Self::InvalidRecord { native_id, problem } => write!(f, "{native_id}: {problem}"),
+            Self::DuplicateNativeId { native_id } => {
+                write!(f, "{native_id}: native id used by more than one spectrum")
+            }
         }
     }
 }
@@ -227,9 +241,15 @@ fn check_stream(
 ) -> Result<usize, ConformanceError> {
     let mut last_index: Option<usize> = None;
     let mut last_rt: HashMap<String, f64> = HashMap::new();
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut count = 0usize;
     for spectrum in iter {
         let spectrum = spectrum?;
+        if !seen_ids.insert(spectrum.native_id.clone()) {
+            return Err(ConformanceError::DuplicateNativeId {
+                native_id: spectrum.native_id.clone(),
+            });
+        }
         check_one(&spectrum, last_index, &mut last_rt)?;
         last_index = Some(spectrum.index);
         count += 1;
@@ -258,6 +278,11 @@ fn check_one(
             });
         }
     }
+    s.validate()
+        .map_err(|problem| ConformanceError::InvalidRecord {
+            native_id: s.native_id.clone(),
+            problem,
+        })?;
     if let Some(tic) = s.total_ion_current {
         let computed: f64 = s.intensity.iter().map(|&v| v as f64).sum();
         if !rel_close(tic, computed, FLOAT_REL_TOL) {
@@ -269,22 +294,22 @@ fn check_one(
         }
     }
     if let Some(bp) = s.base_peak_intensity {
-        if s.intensity.is_empty() {
-            // Nothing to compare against; trust the parser.
-            let _ = bp;
+        // An empty spectrum has a base peak of 0; a declared peak there
+        // contradicts the arrays.
+        let computed = if s.intensity.is_empty() {
+            0.0
         } else {
-            let computed = s
-                .intensity
+            s.intensity
                 .iter()
                 .copied()
-                .fold(f32::NEG_INFINITY, f32::max) as f64;
-            if !rel_close(bp, computed, FLOAT_REL_TOL) {
-                return Err(ConformanceError::BasePeakIntensityMismatch {
-                    native_id: s.native_id.clone(),
-                    declared: bp,
-                    computed,
-                });
-            }
+                .fold(f32::NEG_INFINITY, f32::max) as f64
+        };
+        if !rel_close(bp, computed, FLOAT_REL_TOL) {
+            return Err(ConformanceError::BasePeakIntensityMismatch {
+                native_id: s.native_id.clone(),
+                declared: bp,
+                computed,
+            });
         }
     }
     if s.ms_level >= 2 {
@@ -480,5 +505,37 @@ mod tests {
             err,
             ConformanceError::MobilityArrayLengthMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn detects_non_finite_unsorted_duplicate_and_phantom_base_peak() {
+        let mut nan = ok_spec(0, 1, 1.0);
+        nan.mz[0] = f64::NAN;
+        let err = assert_source_invariants(&mut ToySource(vec![nan], None)).unwrap_err();
+        assert!(
+            matches!(err, ConformanceError::InvalidRecord { .. }),
+            "{err:?}"
+        );
+
+        let mut a = ok_spec(0, 1, 1.0);
+        let mut b = ok_spec(1, 1, 2.0);
+        b.native_id = a.native_id.clone();
+        a.total_ion_current = None;
+        let err = assert_source_invariants(&mut ToySource(vec![a, b], None)).unwrap_err();
+        assert!(
+            matches!(err, ConformanceError::DuplicateNativeId { .. }),
+            "{err:?}"
+        );
+
+        let mut empty = ok_spec(0, 1, 1.0);
+        empty.mz.clear();
+        empty.intensity.clear();
+        empty.total_ion_current = None;
+        empty.base_peak_intensity = Some(50.0);
+        let err = assert_source_invariants(&mut ToySource(vec![empty], None)).unwrap_err();
+        assert!(
+            matches!(err, ConformanceError::BasePeakIntensityMismatch { .. }),
+            "{err:?}"
+        );
     }
 }

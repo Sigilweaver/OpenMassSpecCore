@@ -28,6 +28,20 @@ pub enum Error {
     #[error("vendor parser error: {0}")]
     Vendor(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
 
+    /// The source announced more spectra than were written or skipped, and
+    /// reported no error for the difference. Allow it with
+    /// `Check::SpectrumCountShortfall`.
+    #[error(
+        "the source announced {announced} spectra but only {accounted} were written or skipped"
+    )]
+    #[non_exhaustive]
+    SpectrumCountShortfall {
+        /// The source's `spectrum_count_hint`.
+        announced: usize,
+        /// Spectra written plus spectra skipped.
+        accounted: usize,
+    },
+
     /// A spectrum or chromatogram record failed the writer's checks. The
     /// record is identified by its native id (or chromatogram id).
     #[error("invalid record {record_id:?}: {problem}")]
