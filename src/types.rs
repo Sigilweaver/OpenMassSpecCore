@@ -138,7 +138,7 @@ pub struct PrecursorInfo {
 }
 
 /// An instrument scan window: the m/z range acquired.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct ScanWindow {
     /// Lower m/z limit.
@@ -598,7 +598,7 @@ macro_rules! push_warning {
 push_warning!(SpectrumRecord, ChromatogramRecord, RunMetadata);
 
 /// One collision energy and its unit.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct CollisionEnergy {
     /// The energy.

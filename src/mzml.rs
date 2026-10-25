@@ -638,7 +638,7 @@ pub struct WriteSummary {
 }
 
 /// A source announced more spectra than were written or skipped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CountMismatch {
     /// The source's `spectrum_count_hint`.
@@ -3482,7 +3482,7 @@ mod tests {
             .with_leniency(Leniency::strict().with(Check::SpectrumCountShortfall));
         let mut buf = Vec::new();
         let summary = write_mzml_with_options(&mut src, &mut buf, &lenient).unwrap();
-        let mismatch = summary.spectrum_count_mismatch.unwrap();
+        let mismatch = summary.spectrum_count_mismatch.clone().unwrap();
         assert_eq!((mismatch.announced, mismatch.accounted), (5, 1));
         assert!(summary.has_warnings());
         assert!(String::from_utf8(buf)
