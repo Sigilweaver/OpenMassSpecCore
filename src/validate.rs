@@ -37,7 +37,7 @@ fn finite_opt(field: &str, value: Option<f64>) -> Result<(), RecordProblem> {
 /// those against its own state.
 pub(crate) fn check_spectrum(rec: &SpectrumRecord) -> Result<(), RecordProblem> {
     check_array_lengths(rec)?;
-    finite("retention_time_sec", rec.retention_time_sec)?;
+    finite_opt("retention_time_sec", rec.retention_time_sec)?;
     finite_opt("total_ion_current", rec.total_ion_current)?;
     finite_opt("base_peak_mz", rec.base_peak_mz)?;
     finite_opt("base_peak_intensity", rec.base_peak_intensity)?;

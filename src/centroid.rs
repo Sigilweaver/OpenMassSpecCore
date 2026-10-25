@@ -319,7 +319,7 @@ mod tests {
             analyzer: None,
             acquisition_event_id: None,
             filter: None,
-            retention_time_sec: 1.0,
+            retention_time_sec: Some(1.0),
             total_ion_current: Some(intensity.iter().map(|&v| v as f64).sum()),
             base_peak_mz: Some(100.0),
             base_peak_intensity: Some(100.0),

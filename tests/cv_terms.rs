@@ -301,6 +301,7 @@ impl SpectrumSource for EveryPath {
             .with_scan_mode(ScanMode::Profile)
             .with_filter("f".to_string())
             .with_ion_injection_time_ms(1.0)
+            .with_retention_time_sec(12.0)
             .with_faims_cv(-40.0)
             .with_scan_window(50.0, 1500.0)
             .with_peaks(vec![1.0], vec![1.0])

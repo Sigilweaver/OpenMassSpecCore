@@ -231,8 +231,9 @@ pub struct SpectrumRecord {
     /// Thermo-style scan filter (or vendor-equivalent). Optional; populated
     /// by parsers that have a meaningful filter string.
     pub filter: Option<String>,
-    /// Retention time in seconds.
-    pub retention_time_sec: f64,
+    /// Retention time in seconds. `None` when the source has no time axis
+    /// (the writer omits the scan start time).
+    pub retention_time_sec: Option<f64>,
     /// Total ion current. If `None`, the mzML writer computes it from
     /// `intensity`.
     pub total_ion_current: Option<f64>,
@@ -295,7 +296,7 @@ impl SpectrumRecord {
             analyzer: None,
             acquisition_event_id: None,
             filter: None,
-            retention_time_sec: 0.0,
+            retention_time_sec: None,
             total_ion_current: None,
             base_peak_mz: None,
             base_peak_intensity: None,
@@ -541,7 +542,7 @@ setters!(SpectrumRecord {
     opt with_analyzer analyzer: Analyzer,
     opt with_acquisition_event_id acquisition_event_id: u32,
     opt with_filter filter: String,
-    val with_retention_time_sec retention_time_sec: f64,
+    opt with_retention_time_sec retention_time_sec: f64,
     opt with_total_ion_current total_ion_current: f64,
     opt with_base_peak_mz base_peak_mz: f64,
     opt with_base_peak_intensity base_peak_intensity: f64,

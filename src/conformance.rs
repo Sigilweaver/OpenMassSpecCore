@@ -321,19 +321,23 @@ fn check_one(
             }
         }
     }
+    // A source without a time axis has no order to check.
+    let Some(rt) = s.retention_time_sec else {
+        return Ok(());
+    };
     let key = rt_stream_key(&s.native_id);
     if let Some(prev) = last_rt.get(&key).copied() {
         // Allow tiny floating-point regressions (<1 us).
-        if s.retention_time_sec + 1e-6 < prev {
+        if rt + 1e-6 < prev {
             return Err(ConformanceError::RetentionTimeNonMonotonic {
                 prefix: key,
                 previous: prev,
-                current: s.retention_time_sec,
+                current: rt,
                 native_id: s.native_id.clone(),
             });
         }
     }
-    last_rt.insert(key, s.retention_time_sec);
+    last_rt.insert(key, rt);
     Ok(())
 }
 
@@ -401,7 +405,7 @@ mod tests {
             analyzer: None,
             acquisition_event_id: None,
             filter: None,
-            retention_time_sec: rt,
+            retention_time_sec: Some(rt),
             total_ion_current: Some(30.0),
             base_peak_mz: Some(200.0),
             base_peak_intensity: Some(20.0),

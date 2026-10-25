@@ -1503,14 +1503,16 @@ fn write_spectrum<W: Write>(
     }
 
     // mzML stores RT in minutes by convention.
-    let rt_min = rec.retention_time_sec / 60.0;
-    cv_param_with_unit(
-        out,
-        S,
-        cv::SCAN_START_TIME,
-        format_args!("{rt_min:.6}"),
-        cv::MINUTE,
-    )?;
+    if let Some(rt_sec) = rec.retention_time_sec {
+        let rt_min = rt_sec / 60.0;
+        cv_param_with_unit(
+            out,
+            S,
+            cv::SCAN_START_TIME,
+            format_args!("{rt_min:.6}"),
+            cv::MINUTE,
+        )?;
+    }
 
     if let Some(it) = rec.ion_injection_time_ms {
         cv_param_with_unit(
@@ -2004,7 +2006,7 @@ mod tests {
             analyzer: None,
             acquisition_event_id: None,
             filter: None,
-            retention_time_sec: index as f64,
+            retention_time_sec: Some(index as f64),
             total_ion_current: None,
             base_peak_mz: None,
             base_peak_intensity: None,
@@ -3189,7 +3191,7 @@ mod tests {
             RecordProblem::NonFinite { .. }
         ));
         let mut inf_rt = two_peaks();
-        inf_rt.retention_time_sec = f64::INFINITY;
+        inf_rt.retention_time_sec = Some(f64::INFINITY);
         assert!(matches!(
             problem_of(write_one(inf_rt, &WriteOptions::new())),
             RecordProblem::NonFinite { .. }
@@ -3453,7 +3455,7 @@ mod tests {
         src.spectra = (0..5).map(|i| minimal_spectrum(i, None)).collect();
         src.failing_spectra = vec![1];
         src.spectra[3].intensity.clear();
-        src.spectra[4].retention_time_sec = f64::NAN;
+        src.spectra[4].retention_time_sec = Some(f64::NAN);
         let opts = WriteOptions::new()
             .with_record_error_policy(RecordErrorPolicy::Skip)
             .with_max_reported_issues(2);
@@ -3577,5 +3579,15 @@ mod tests {
         )
         .unwrap();
         assert!(s.contains(r#"<scanWindowList count="2">"#));
+    }
+
+    #[test]
+    fn missing_retention_time_omits_the_scan_start_time() {
+        let mut rec = two_peaks();
+        rec.retention_time_sec = None;
+        let (s, _) = write_one(rec, &WriteOptions::new()).unwrap();
+        assert!(!s.contains("MS:1000016"));
+        let (s, _) = write_one(two_peaks(), &WriteOptions::new()).unwrap();
+        assert!(s.contains("MS:1000016"));
     }
 }
