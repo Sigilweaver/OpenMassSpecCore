@@ -619,15 +619,18 @@ impl CollisionEnergy {
 
 impl PrecursorInfo {
     /// Append one collision energy. Pass the unit the source states, or
-    /// `None` when it does not say; there is no default.
+    /// `None` when it does not say; there is no default. A `None` value
+    /// (the source has no energy) appends nothing and ignores the unit.
     #[must_use]
     pub fn with_collision_energy(
         mut self,
-        value: f64,
+        value: impl Into<Option<f64>>,
         unit: impl Into<Option<CollisionEnergyUnit>>,
     ) -> Self {
-        self.collision_energies
-            .push(CollisionEnergy::new(value, unit));
+        if let Some(value) = value.into() {
+            self.collision_energies
+                .push(CollisionEnergy::new(value, unit));
+        }
         self
     }
 }
