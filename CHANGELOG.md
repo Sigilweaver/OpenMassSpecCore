@@ -35,8 +35,15 @@ Each is its own commit.
 - `SpectrumIter` and `ChromatogramIter` are `Send`.
 - `WriteSummary` is not `Copy` or `Eq`, `WriteOptions` is not `Eq`, and
   `WriteSummary::spectrum_count_mismatch` is `Option<CountMismatch>`.
-- `openmassspec_arrow::SpectrumBatchBuilder::push` returns a typed
-  `Result` (see the Arrow entries below).
+- `openmassspec-arrow` (own version line, 4.0.0): `SpectrumBatchBuilder::push`
+  returns `Result<(), BatchError>` and runs `SpectrumRecord::validate`
+  (array lengths, non-finite values, unsorted m/z, scan windows) plus a
+  duplicate-native-id check, so `read_arrow` no longer passes NaN or unsorted
+  m/z through; `finish` returns `BatchError`. The `precursor_ce_is_nce`
+  column is replaced by `precursor_collision_energy_unit` (Utf8, `as_str`
+  label, null when unknown); `retention_time_sec` is nullable. Arrow types
+  are behind the `arrow-60` feature (default); a new arrow-rs major is a new
+  feature, not a Core release.
 
 ### Behavior changes
 
@@ -124,6 +131,11 @@ Files that convert today can fail or read differently:
 - `ScanWindow`, `CollisionEnergy`, `CollisionEnergyUnit`, `ParseLabelError`,
   `TimeAxis` and `RunMetadata::time_axis`. `Check::other` maps a built-in
   code to the built-in variant; `Leniency::all()` covers built-in checks only.
+- `openmassspec-arrow`: columns `precursor_collision_energies`,
+  `scan_windows` and `warnings` (code and message), appended at the end;
+  `openmassspec.schema_version` in the schema metadata with
+  `check_schema_version`; `SpectrumBatchBuilder::finish_batch`, which keeps
+  the builder (and its duplicate-id memory) for the next batch of a stream.
 
 ## [3.0.0] - 2026-10-11
 
