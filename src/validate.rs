@@ -60,15 +60,17 @@ pub(crate) fn check_spectrum(rec: &SpectrumRecord) -> Result<(), RecordProblem> 
     if let Some(p) = &rec.precursor {
         check_precursor(p)?;
     }
-    for (i, &v) in rec.mz.iter().enumerate() {
-        finite(&format!("mz[{i}]"), v)?;
+    // Scan first and name the field only for the element that fails: this
+    // runs on every peak of every spectrum.
+    if let Some(i) = rec.mz.iter().position(|v| !v.is_finite()) {
+        finite_with(|| format!("mz[{i}]"), rec.mz[i])?;
     }
-    for (i, &v) in rec.intensity.iter().enumerate() {
-        finite(&format!("intensity[{i}]"), f64::from(v))?;
+    if let Some(i) = rec.intensity.iter().position(|v| !v.is_finite()) {
+        finite_with(|| format!("intensity[{i}]"), f64::from(rec.intensity[i]))?;
     }
     if let Some(mob) = &rec.inv_mobility_per_peak {
-        for (i, &v) in mob.iter().enumerate() {
-            finite(&format!("inv_mobility_per_peak[{i}]"), f64::from(v))?;
+        if let Some(i) = mob.iter().position(|v| !v.is_finite()) {
+            finite_with(|| format!("inv_mobility_per_peak[{i}]"), f64::from(mob[i]))?;
         }
     }
     for (i, w) in rec.mz.windows(2).enumerate() {
@@ -141,11 +143,11 @@ pub(crate) fn check_chromatogram(rec: &ChromatogramRecord) -> Result<(), RecordP
     }
     finite_opt("precursor_mz", rec.precursor_mz)?;
     finite_opt("product_mz", rec.product_mz)?;
-    for (i, &v) in rec.time_sec.iter().enumerate() {
-        finite(&format!("time_sec[{i}]"), f64::from(v))?;
+    if let Some(i) = rec.time_sec.iter().position(|v| !v.is_finite()) {
+        finite_with(|| format!("time_sec[{i}]"), f64::from(rec.time_sec[i]))?;
     }
-    for (i, &v) in rec.intensity.iter().enumerate() {
-        finite(&format!("intensity[{i}]"), f64::from(v))?;
+    if let Some(i) = rec.intensity.iter().position(|v| !v.is_finite()) {
+        finite_with(|| format!("intensity[{i}]"), f64::from(rec.intensity[i]))?;
     }
     Ok(())
 }
