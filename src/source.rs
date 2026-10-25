@@ -4,12 +4,13 @@ use crate::error::Result;
 use crate::types::{ChromatogramRecord, CvTerm, RunMetadata, SpectrumRecord};
 
 /// Boxed, fallible spectrum iterator returned by
-/// [`SpectrumSource::iter_spectra`].
-pub type SpectrumIter<'a> = Box<dyn Iterator<Item = Result<SpectrumRecord>> + 'a>;
+/// [`SpectrumSource::iter_spectra`]. It is `Send`, so a source can be
+/// driven from a worker thread (the Python wheels do).
+pub type SpectrumIter<'a> = Box<dyn Iterator<Item = Result<SpectrumRecord>> + Send + 'a>;
 
 /// Boxed, fallible chromatogram iterator returned by
-/// [`SpectrumSource::iter_chromatograms`].
-pub type ChromatogramIter<'a> = Box<dyn Iterator<Item = Result<ChromatogramRecord>> + 'a>;
+/// [`SpectrumSource::iter_chromatograms`]. It is `Send`.
+pub type ChromatogramIter<'a> = Box<dyn Iterator<Item = Result<ChromatogramRecord>> + Send + 'a>;
 
 /// A source of decoded mass spectra.
 ///
