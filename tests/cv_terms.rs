@@ -302,7 +302,7 @@ impl SpectrumSource for EveryPath {
             .with_filter("f".to_string())
             .with_ion_injection_time_ms(1.0)
             .with_faims_cv(-40.0)
-            .with_scan_window((50.0, 1500.0))
+            .with_scan_window(50.0, 1500.0)
             .with_peaks(vec![1.0], vec![1.0])
             .with_inv_mobility_per_peak(vec![0.9]);
         // The writer has no scan-level drift-time term and rejects the

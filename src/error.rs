@@ -88,6 +88,17 @@ pub enum RecordProblem {
     /// The native id was already written for an earlier record.
     #[error("native id already used by an earlier record")]
     DuplicateId,
+    /// A scan window is reversed or has a negative lower limit.
+    #[error("scan window {index} is invalid: {lower} to {upper} (need 0 <= lower <= upper)")]
+    #[non_exhaustive]
+    InvalidScanWindow {
+        /// Index into `scan_windows`.
+        index: usize,
+        /// Lower limit.
+        lower: f64,
+        /// Upper limit.
+        upper: f64,
+    },
     /// A precursor `spectrumRef` names a spectrum that is not in the output.
     #[error("precursor references spectrum {reference:?}, which is not in the output")]
     #[non_exhaustive]

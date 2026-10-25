@@ -16,6 +16,18 @@ fn finite(field: &str, value: f64) -> Result<(), RecordProblem> {
     }
 }
 
+/// Like [`finite`], but builds the field name only when the check fails.
+fn finite_with(field: impl FnOnce() -> String, value: f64) -> Result<(), RecordProblem> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(RecordProblem::NonFinite {
+            field: field(),
+            value,
+        })
+    }
+}
+
 fn finite_opt(field: &str, value: Option<f64>) -> Result<(), RecordProblem> {
     value.map_or(Ok(()), |v| finite(field, v))
 }
@@ -34,6 +46,17 @@ pub(crate) fn check_spectrum(rec: &SpectrumRecord) -> Result<(), RecordProblem> 
     finite_opt("ion_injection_time_ms", rec.ion_injection_time_ms)?;
     finite_opt("inv_mobility", rec.inv_mobility)?;
     finite_opt("faims_cv", rec.faims_cv)?;
+    for (i, w) in rec.scan_windows.iter().enumerate() {
+        finite_with(|| format!("scan_windows[{i}].lower"), w.lower)?;
+        finite_with(|| format!("scan_windows[{i}].upper"), w.upper)?;
+        if w.lower < 0.0 || w.lower > w.upper {
+            return Err(RecordProblem::InvalidScanWindow {
+                index: i,
+                lower: w.lower,
+                upper: w.upper,
+            });
+        }
+    }
     if let Some(p) = &rec.precursor {
         check_precursor(p)?;
     }

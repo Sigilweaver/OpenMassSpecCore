@@ -407,7 +407,7 @@ mod tests {
             base_peak_intensity: Some(20.0),
             low_mz: Some(100.0),
             high_mz: Some(200.0),
-            scan_window: None,
+            scan_windows: Vec::new(),
             ion_injection_time_ms: None,
             inv_mobility: None,
             faims_cv: None,

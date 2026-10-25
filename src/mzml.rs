@@ -1534,24 +1534,30 @@ fn write_spectrum<W: Write>(
     const W16: &str = "                ";
     // The scan window is the instrument's acquisition range, which is not
     // the observed m/z range, so it is written only when the reader gave it.
-    if let Some((lo, hi)) = rec.scan_window {
-        writeln!(out, r#"            <scanWindowList count="1">"#)?;
-        writeln!(out, r#"              <scanWindow>"#)?;
-        cv_param_with_unit(
+    if !rec.scan_windows.is_empty() {
+        writeln!(
             out,
-            W16,
-            cv::SCAN_WINDOW_LOWER_LIMIT,
-            format_args!("{lo:.6}"),
-            cv::MZ,
+            r#"            <scanWindowList count="{}">"#,
+            rec.scan_windows.len()
         )?;
-        cv_param_with_unit(
-            out,
-            W16,
-            cv::SCAN_WINDOW_UPPER_LIMIT,
-            format_args!("{hi:.6}"),
-            cv::MZ,
-        )?;
-        writeln!(out, r#"              </scanWindow>"#)?;
+        for w in &rec.scan_windows {
+            writeln!(out, r#"              <scanWindow>"#)?;
+            cv_param_with_unit(
+                out,
+                W16,
+                cv::SCAN_WINDOW_LOWER_LIMIT,
+                format_args!("{:.6}", w.lower),
+                cv::MZ,
+            )?;
+            cv_param_with_unit(
+                out,
+                W16,
+                cv::SCAN_WINDOW_UPPER_LIMIT,
+                format_args!("{:.6}", w.upper),
+                cv::MZ,
+            )?;
+            writeln!(out, r#"              </scanWindow>"#)?;
+        }
         writeln!(out, r#"            </scanWindowList>"#)?;
     }
     writeln!(out, r#"          </scan>"#)?;
@@ -1990,7 +1996,7 @@ mod tests {
             base_peak_intensity: None,
             low_mz: None,
             high_mz: None,
-            scan_window: None,
+            scan_windows: Vec::new(),
             ion_injection_time_ms: None,
             inv_mobility: None,
             faims_cv,
@@ -3339,7 +3345,9 @@ mod tests {
             "observed range is not a scan window"
         );
         let (s, _) = write_one(
-            two_peaks().with_scan_window((50.0, 1500.0)),
+            two_peaks()
+                .with_scan_window(50.0, 1500.0)
+                .with_scan_window(1500.0, 2000.0),
             &WriteOptions::new(),
         )
         .unwrap();
@@ -3507,5 +3515,34 @@ mod tests {
             summary.warning_counts.get("unknown_collision_energy_unit"),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn invalid_scan_windows_are_errors() {
+        for (lo, hi) in [
+            (f64::NAN, 100.0),
+            (50.0, f64::INFINITY),
+            (200.0, 100.0),
+            (-1.0, 100.0),
+        ] {
+            let rec = two_peaks().with_scan_window(lo, hi);
+            let p = problem_of(write_one(rec, &WriteOptions::new()));
+            assert!(
+                matches!(
+                    p,
+                    RecordProblem::NonFinite { .. } | RecordProblem::InvalidScanWindow { .. }
+                ),
+                "{lo} {hi}: {p:?}"
+            );
+        }
+        // Several valid windows are written in order.
+        let (s, _) = write_one(
+            two_peaks()
+                .with_scan_window(100.0, 200.0)
+                .with_scan_window(300.0, 400.0),
+            &WriteOptions::new(),
+        )
+        .unwrap();
+        assert!(s.contains(r#"<scanWindowList count="2">"#));
     }
 }

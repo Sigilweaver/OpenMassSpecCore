@@ -136,6 +136,23 @@ pub struct PrecursorInfo {
     pub ccs: Option<f64>,
 }
 
+/// An instrument scan window: the m/z range acquired.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct ScanWindow {
+    /// Lower m/z limit.
+    pub lower: f64,
+    /// Upper m/z limit.
+    pub upper: f64,
+}
+
+impl ScanWindow {
+    /// A window from `lower` to `upper` m/z.
+    pub fn new(lower: f64, upper: f64) -> Self {
+        Self { lower, upper }
+    }
+}
+
 /// One fully-decoded spectrum.
 ///
 /// Retention time is stored in **seconds** (the mzML preferred unit). Vendors
@@ -228,11 +245,12 @@ pub struct SpectrumRecord {
     pub low_mz: Option<f64>,
     /// Highest observed m/z. If `None`, the writer uses `mz.last()`.
     pub high_mz: Option<f64>,
-    /// Instrument scan window `(lower, upper)` in m/z: the acquisition
-    /// range, which is not the observed range of the peaks. The mzML writer
-    /// emits `scanWindowList` only from this field.
-    #[serde(default)]
-    pub scan_window: Option<(f64, f64)>,
+    /// Instrument scan windows in m/z: the acquisition ranges, which are not
+    /// the observed range of the peaks. Segmented and multi-window
+    /// acquisitions have several. The mzML writer emits `scanWindowList`
+    /// only from this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scan_windows: Vec<ScanWindow>,
     /// Ion injection (accumulation) time in milliseconds.
     pub ion_injection_time_ms: Option<f64>,
     /// Mean inverse reduced ion mobility (1/K0) for the spectrum, when
@@ -282,7 +300,7 @@ impl SpectrumRecord {
             base_peak_intensity: None,
             low_mz: None,
             high_mz: None,
-            scan_window: None,
+            scan_windows: Vec::new(),
             ion_injection_time_ms: None,
             inv_mobility: None,
             faims_cv: None,
@@ -305,6 +323,12 @@ impl SpectrumRecord {
     /// Insert one `extra` entry. Keys use `<reader>.<field>`.
     pub fn with_extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra.insert(key.into(), value.into());
+        self
+    }
+
+    /// Append one scan window (`lower` to `upper` m/z).
+    pub fn with_scan_window(mut self, lower: f64, upper: f64) -> Self {
+        self.scan_windows.push(ScanWindow::new(lower, upper));
         self
     }
 
@@ -522,7 +546,7 @@ setters!(SpectrumRecord {
     opt with_base_peak_intensity base_peak_intensity: f64,
     opt with_low_mz low_mz: f64,
     opt with_high_mz high_mz: f64,
-    opt with_scan_window scan_window: (f64, f64),
+    val with_scan_windows scan_windows: Vec<ScanWindow>,
     opt with_ion_injection_time_ms ion_injection_time_ms: f64,
     opt with_inv_mobility inv_mobility: f64,
     opt with_faims_cv faims_cv: f64,

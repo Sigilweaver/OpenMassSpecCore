@@ -54,7 +54,9 @@ pub use mzml::{
     RecordErrorPolicy, WriteIssue, WriteOptions, WriteSummary,
 };
 pub use source::{ChromatogramIter, SpectrumIter, SpectrumSource};
-pub use types::{ChromatogramRecord, CvTerm, PrecursorInfo, RunMetadata, SpectrumRecord};
+pub use types::{
+    ChromatogramRecord, CvTerm, PrecursorInfo, RunMetadata, ScanWindow, SpectrumRecord,
+};
 pub use warning::{Warning, WarningKind};
 
 /// Crate version (set from `Cargo.toml`).
