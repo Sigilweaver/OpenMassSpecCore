@@ -35,15 +35,22 @@ Each is its own commit.
 - `SpectrumIter` and `ChromatogramIter` are `Send`.
 - `WriteSummary` is not `Copy` or `Eq`, `WriteOptions` is not `Eq`, and
   `WriteSummary::spectrum_count_mismatch` is `Option<CountMismatch>`.
-- `openmassspec-arrow` (own version line, 4.0.0): `SpectrumBatchBuilder::push`
-  returns `Result<(), BatchError>` and runs `SpectrumRecord::validate`
-  (array lengths, non-finite values, unsorted m/z, scan windows) plus a
-  duplicate-native-id check, so `read_arrow` no longer passes NaN or unsorted
-  m/z through; `finish` returns `BatchError`. The `precursor_ce_is_nce`
-  column is replaced by `precursor_collision_energy_unit` (Utf8, `as_str`
-  label, null when unknown); `retention_time_sec` is nullable. Arrow types
-  are behind the `arrow-60` feature (default); a new arrow-rs major is a new
-  feature, not a Core release.
+- `openmassspec-arrow` (own version line, 4.0.0): everything moves into a
+  module named for the arrow-rs release, `openmassspec_arrow::arrow_60`
+  (feature `arrow-60`, default); only version-independent items
+  (`SCHEMA_VERSION`, `SCHEMA_VERSION_KEY`, `COLUMNS`,
+  `check_schema_version_value`, `SchemaVersionError`) stay at the root. A new
+  arrow-rs major is a new module and feature beside it, not a Core release,
+  and `BatchError` is per module because it wraps that release's `ArrowError`.
+  `SpectrumBatchBuilder::push` returns `Result<(), BatchError>` and runs
+  `SpectrumRecord::validate` plus a duplicate-native-id check, so `read_arrow`
+  no longer passes NaN or unsorted m/z through; `finish` returns
+  `BatchError`. The `precursor_ce_is_nce` column is replaced by
+  `precursor_collision_energy_unit` (Utf8, `as_str` label, null when
+  unknown); `retention_time_sec` is nullable. Any change to a column type,
+  including a new field in a list-of-struct column, bumps `SCHEMA_VERSION`;
+  files from the 3.x crate carry no version and are rejected with an error
+  that says so.
 
 ### Behavior changes
 

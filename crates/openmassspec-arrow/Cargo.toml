@@ -20,10 +20,10 @@ workspace = true
 [features]
 default = ["arrow-60"]
 # Each arrow-rs major is a feature; a new one is added alongside, in a minor release.
-arrow-60 = ["dep:arrow-array", "dep:arrow-schema"]
+arrow-60 = ["dep:arrow-array-60", "dep:arrow-schema-60"]
 
 [dependencies]
 openmassspec-core = { version = "4.0.0", path = "../.." }
 thiserror = "2"
-arrow-array = { version = "60", optional = true }
-arrow-schema = { version = "60", optional = true }
+arrow-array-60 = { package = "arrow-array", version = "60", optional = true }
+arrow-schema-60 = { package = "arrow-schema", version = "60", optional = true }
