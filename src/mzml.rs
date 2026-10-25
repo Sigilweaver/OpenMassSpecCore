@@ -2072,6 +2072,7 @@ mod tests {
             low_mz: None,
             high_mz: None,
             scan_windows: Vec::new(),
+            removed_scan_window: None,
             ion_injection_time_ms: None,
             inv_mobility: None,
             faims_cv,

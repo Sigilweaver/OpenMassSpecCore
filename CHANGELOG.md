@@ -26,6 +26,7 @@ Each is its own commit.
   `FromStr`.
 - `SpectrumRecord::retention_time_sec` is `Option<f64>`;
   `with_retention_time_sec` still takes an `f64`.
+- `ScanWindow`, `CollisionEnergy` and `CountMismatch` are not `Copy`.
 - `MsPower` is removed.
 - `Error::Format` and `Error::Conformance` are removed; `Error::Vendor`
   exposes its source. `RecordProblem::Unsupported` is replaced by typed
@@ -65,6 +66,14 @@ Files that convert today can fail or read differently:
   The writer now writes the document head after it has read the spectra, so
   when a write fails, `out` holds no head and no partial `<spectrumList>`.
   `<fileContent>` declares only the spectrum kinds written.
+- A spectrum with no `retention_time_sec` is `RecordProblem::MissingRetentionTime`
+  unless the run declares `RunMetadata::time_axis = TimeAxis::Absent`
+  (then a spectrum that has one is `UnexpectedRetentionTime`). The
+  conformance harness requires it on every spectrum of a stream or on none.
+- JSON written by Core 3 is rejected with a message naming the replacement
+  when it carries `scan_window` (non-null), `collision_energy` or
+  `ce_is_nce`; it used to be read with those fields silently dropped.
+  Python layers that round-trip record dicts must convert them.
 - A spectrum with `scan_mode: None` is a record error
   (`RecordProblem::UnknownScanMode`) that stops the write even under
   `RecordErrorPolicy::Skip`. It used to be written as "profile spectrum".
@@ -112,7 +121,9 @@ Files that convert today can fail or read differently:
 - `WriteSummary::issues`, `issues_truncated`, `warning_counts`,
   `spectra_invalid`, `chromatograms_invalid`, `has_warnings`;
   `WriteOptions::max_reported_issues`; `RecordKind`, `WriteIssue`.
-- `ScanWindow`, `CollisionEnergy`, `CollisionEnergyUnit`, `ParseLabelError`.
+- `ScanWindow`, `CollisionEnergy`, `CollisionEnergyUnit`, `ParseLabelError`,
+  `TimeAxis` and `RunMetadata::time_axis`. `Check::other` maps a built-in
+  code to the built-in variant; `Leniency::all()` covers built-in checks only.
 
 ## [3.0.0] - 2026-10-11
 

@@ -51,9 +51,15 @@ impl Check {
         Check::SpectrumCountShortfall,
     ];
 
-    /// A reader-defined check with a namespaced `code`.
+    /// A reader-defined check with a namespaced `code`. A code that names a
+    /// built-in check gives that built-in variant, so `allows` never misses
+    /// it.
     pub fn other(code: impl Into<Cow<'static, str>>) -> Self {
-        Check::Other(code.into())
+        let code = code.into();
+        match code.parse::<Check>() {
+            Ok(builtin) => builtin,
+            Err(_) => Check::Other(code),
+        }
     }
 
     /// Stable name (`"unknown_scan_mode"`, ...); the code of an
@@ -129,7 +135,9 @@ impl Leniency {
         Self::default()
     }
 
-    /// Every built-in check this version knows is relaxed.
+    /// Every built-in check this version knows is relaxed. Reader-defined
+    /// ([`Check::Other`]) checks are not included: add them with
+    /// [`with`](Self::with).
     pub fn all() -> Self {
         Self {
             allowed: Check::ALL.iter().cloned().collect(),
@@ -189,5 +197,10 @@ mod tests {
         assert!(!Leniency::all().allows(&mine));
         assert!(Leniency::strict().with(mine.clone()).allows(&mine));
         assert!("opensxraw.calibration_range".parse::<Check>().is_err());
+        // A built-in code gives the built-in variant.
+        assert_eq!(Check::other("unknown_scan_mode"), Check::UnknownScanMode);
+        assert!(Leniency::strict()
+            .with(Check::UnknownScanMode)
+            .allows(&Check::other("unknown_scan_mode")));
     }
 }

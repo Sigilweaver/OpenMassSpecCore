@@ -120,6 +120,12 @@ pub struct PrecursorInfo {
     /// allowed).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collision_energies: Vec<CollisionEnergy>,
+    /// Core 3 key, rejected on input (see `removed_field!`).
+    #[serde(default, rename = "collision_energy", skip_serializing)]
+    pub(crate) removed_collision_energy: Option<RemovedCollisionEnergy>,
+    /// Core 3 key, rejected on input (see `removed_field!`).
+    #[serde(default, rename = "ce_is_nce", skip_serializing)]
+    pub(crate) removed_ce_is_nce: Option<RemovedCeIsNce>,
     /// Native ID of the precursor scan when known. Vendors should populate
     /// this with the same string they will use as the `native_id` for that
     /// MS1 spectrum, so mzML `spectrumRef` lookups round-trip cleanly.
@@ -136,6 +142,34 @@ pub struct PrecursorInfo {
     /// downstream consumers to guess a calibration.
     pub ccs: Option<f64>,
 }
+
+/// Declares a JSON key that Core 3 wrote and Core 4 removed. A non-null
+/// value is a deserialization error that names the replacement, so old
+/// records are rejected instead of silently losing the field.
+macro_rules! removed_field {
+    ($name:ident, $msg:expr) => {
+        #[derive(Debug, Clone, PartialEq)]
+        pub(crate) struct $name;
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
+                Err(serde::de::Error::custom($msg))
+            }
+        }
+    };
+}
+removed_field!(
+    RemovedScanWindow,
+    "`scan_window` was replaced by `scan_windows`, a list of {lower, upper}"
+);
+removed_field!(
+    RemovedCollisionEnergy,
+    "`collision_energy` was replaced by `collision_energies`, a list of {value, unit}"
+);
+removed_field!(
+    RemovedCeIsNce,
+    "`ce_is_nce` was replaced by the `unit` of each entry in `collision_energies`"
+);
 
 /// An instrument scan window: the m/z range acquired.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -253,6 +287,9 @@ pub struct SpectrumRecord {
     /// only from this field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scan_windows: Vec<ScanWindow>,
+    /// Core 3 key, rejected on input (see `removed_field!`).
+    #[serde(default, rename = "scan_window", skip_serializing)]
+    pub(crate) removed_scan_window: Option<RemovedScanWindow>,
     /// Ion injection (accumulation) time in milliseconds.
     pub ion_injection_time_ms: Option<f64>,
     /// Mean inverse reduced ion mobility (1/K0) for the spectrum, when
@@ -303,6 +340,7 @@ impl SpectrumRecord {
             low_mz: None,
             high_mz: None,
             scan_windows: Vec::new(),
+            removed_scan_window: None,
             ion_injection_time_ms: None,
             inv_mobility: None,
             faims_cv: None,
@@ -792,5 +830,35 @@ mod tests {
             SpectrumRecord::new(0, 1, "scan=1").with_peaks(vec![100.0, 200.0], vec![f32::NAN, 5.0]);
         let (_, i) = rec.effective_base_peak().unwrap();
         assert!(i.is_nan(), "a NaN must surface, not be skipped");
+    }
+
+    #[test]
+    fn core_3_json_keys_are_rejected_with_a_pointer_to_the_replacement() {
+        let rec = SpectrumRecord::new(0, 1, "scan=1").with_scan_window(50.0, 500.0);
+        let json = serde_json::to_value(&rec).unwrap();
+        assert!(json.get("scan_window").is_none());
+        assert!(json.get("scan_windows").is_some());
+        let back: SpectrumRecord = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, rec);
+
+        // A Core 3 record: a scan_window value is an error ...
+        let mut old = json.clone();
+        old["scan_window"] = serde_json::json!([50.0, 500.0]);
+        let err = serde_json::from_value::<SpectrumRecord>(old).unwrap_err();
+        assert!(err.to_string().contains("scan_windows"), "{err}");
+        // ... but the null Core 3 wrote for "no window" is fine.
+        let mut null = json;
+        null["scan_window"] = serde_json::Value::Null;
+        serde_json::from_value::<SpectrumRecord>(null).unwrap();
+
+        let p = PrecursorInfo::default().with_collision_energy(30.0, CollisionEnergyUnit::Nce);
+        let mut pj = serde_json::to_value(&p).unwrap();
+        assert!(pj.get("ce_is_nce").is_none() && pj.get("collision_energy").is_none());
+        pj["ce_is_nce"] = serde_json::json!(true);
+        let err = serde_json::from_value::<PrecursorInfo>(pj.clone()).unwrap_err();
+        assert!(err.to_string().contains("collision_energies"), "{err}");
+        pj.as_object_mut().unwrap().remove("ce_is_nce");
+        pj["collision_energy"] = serde_json::json!(30.0);
+        assert!(serde_json::from_value::<PrecursorInfo>(pj).is_err());
     }
 }
