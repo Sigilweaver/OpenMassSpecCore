@@ -21,6 +21,7 @@
 //! instrument, chromatogram types) come from the source's
 //! [`RunMetadata`](crate::RunMetadata) and records as [`CvTerm`] values.
 
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
@@ -32,9 +33,10 @@ use flate2::Compression as ZlibLevel;
 
 use crate::cv::{self, Term};
 use crate::enums::{Activation, Analyzer, Compression, MobilityArrayKind, Polarity, ScanMode};
-use crate::error::Result;
+use crate::error::{Error, RecordProblem, Result};
 use crate::source::SpectrumSource;
 use crate::types::{ChromatogramRecord, CvTerm, RunMetadata, SpectrumRecord};
+use crate::validate;
 
 // ---------- byte-counting writer that also feeds a streaming SHA-1 ----------
 
@@ -294,7 +296,7 @@ fn cv_term_param<W: Write>(out: &mut W, indent: &str, term: &CvTerm) -> io::Resu
 ///
 /// An empty slice means no PSI-MS term is a faithful match, so the writer
 /// emits no dissociation-method cvParam rather than guessing.
-fn activation_terms(act: Activation, analyzer: Option<Analyzer>) -> &'static [Term] {
+fn activation_terms(act: Activation) -> &'static [Term] {
     match act {
         Activation::HCD => &[cv::BEAM_TYPE_COLLISION_INDUCED_DISSOCIATION],
         Activation::ETD => &[cv::ELECTRON_TRANSFER_DISSOCIATION],
@@ -304,17 +306,17 @@ fn activation_terms(act: Activation, analyzer: Option<Analyzer>) -> &'static [Te
             cv::ELECTRON_TRANSFER_DISSOCIATION,
             cv::ELECTRON_TRANSFER_HIGHER_ENERGY_COLLISION_DISSOCIATION,
         ],
-        Activation::CID => match analyzer {
-            Some(Analyzer::FTMS) => &[cv::BEAM_TYPE_COLLISION_INDUCED_DISSOCIATION],
-            _ => &[cv::COLLISION_INDUCED_DISSOCIATION],
-        },
+        // CID is resonant CID whatever analyzer read the fragments out
+        // (ion-trap CID with Orbitrap readout is common). Readers that
+        // know a scan is beam-type send `Activation::HCD`.
+        Activation::CID => &[cv::COLLISION_INDUCED_DISSOCIATION],
         // MS:1000435 carries the exact synonyms "multiphoton dissociation"
         // and "MPD" in the PSI-MS CV.
         Activation::MPID => &[cv::PHOTODISSOCIATION],
         Activation::ECD => &[cv::ELECTRON_CAPTURE_DISSOCIATION],
         Activation::IRMPD => &[cv::INFRARED_MULTIPHOTON_DISSOCIATION],
         // "Proton transfer decay / activated-ion" has no matching PSI-MS
-        // dissociation term, so emit nothing.
+        // dissociation term; the writer emits a userParam instead.
         Activation::PD => &[],
         Activation::PQD => &[cv::PULSED_Q_DISSOCIATION],
         Activation::UVPD => &[cv::ULTRAVIOLET_PHOTODISSOCIATION],
@@ -479,6 +481,22 @@ pub enum RecordErrorPolicy {
     Skip,
 }
 
+/// What the writer does with a spectrum whose `scan_mode` is `None`.
+///
+/// The mzML spectrum-representation term (profile or centroid) is a claim
+/// about the data. The writer never makes it without the reader's say-so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ScanModePolicy {
+    /// Treat the spectrum as a record error ([`RecordProblem::UnknownScanMode`]).
+    #[default]
+    Require,
+    /// Write the spectrum with no profile/centroid term and a
+    /// `openmassspec: spectrum representation` userParam of `unknown`, and
+    /// count it in [`WriteSummary::spectra_unknown_scan_mode`].
+    Omit,
+}
+
 /// Options for [`write_mzml_with_options`] and
 /// [`write_indexed_mzml_with_options`].
 ///
@@ -497,6 +515,9 @@ pub struct WriteOptions {
     pub compression: Compression,
     /// Handling of `Err` records. Defaults to [`RecordErrorPolicy::Fail`].
     pub record_error_policy: RecordErrorPolicy,
+    /// Handling of spectra with `scan_mode: None`. Defaults to
+    /// [`ScanModePolicy::Require`].
+    pub scan_mode_policy: ScanModePolicy,
     /// Directory for the temporary file that holds written spectra once
     /// they pass 64 MiB (see [`write_mzml_with_options`]). `None`, the
     /// default, uses [`std::env::temp_dir`].
@@ -523,6 +544,13 @@ impl WriteOptions {
         self
     }
 
+    /// Set the handling of spectra whose `scan_mode` is `None`.
+    #[must_use]
+    pub fn with_scan_mode_policy(mut self, policy: ScanModePolicy) -> Self {
+        self.scan_mode_policy = policy;
+        self
+    }
+
     /// Set the directory for the spectrum spool file.
     #[must_use]
     pub fn with_spool_dir(mut self, dir: impl Into<PathBuf>) -> Self {
@@ -542,12 +570,45 @@ pub struct WriteSummary {
     pub spectra_skipped: usize,
     /// `<chromatogram>` elements written.
     pub chromatograms_written: usize,
-    /// Chromatograms left out because the source yielded `Err` (only with
-    /// [`RecordErrorPolicy::Skip`]).
+    /// Chromatograms left out because the source yielded `Err` or the
+    /// writer rejected them (only with [`RecordErrorPolicy::Skip`]).
     pub chromatograms_skipped: usize,
+    /// Of `chromatograms_skipped`, those the writer rejected (mismatched
+    /// arrays, non-finite values, duplicate id).
+    pub chromatograms_invalid: usize,
+    /// Of `spectra_skipped`, the spectra the source yielded fine but the
+    /// writer rejected (malformed arrays, non-finite values, duplicate
+    /// native id, unknown scan mode, ...). Run with
+    /// [`RecordErrorPolicy::Fail`] to see the first reason.
+    pub spectra_invalid: usize,
+    /// Spectra written without a profile/centroid term because their
+    /// `scan_mode` was `None` (only with [`ScanModePolicy::Omit`]). Each
+    /// carries an `openmassspec: spectrum representation` userParam.
+    pub spectra_unknown_scan_mode: usize,
+    /// Precursors written without a `spectrumRef` because the referenced
+    /// spectrum is not in the output, normally because it was skipped
+    /// (only with [`RecordErrorPolicy::Skip`]). Each carries an
+    /// `openmassspec: precursor spectrumRef dropped` userParam.
+    pub dangling_precursor_refs: usize,
+    /// `Some((hint, accounted))` when the source gave a
+    /// [`SpectrumSource::spectrum_count_hint`] and it differs from
+    /// `spectra_written + spectra_skipped`. A skipped `Err` can stand for
+    /// several spectra and a source may end early after an `Err`, so a
+    /// mismatch means spectra may be unaccounted for.
+    pub spectrum_count_mismatch: Option<(usize, usize)>,
 }
 
 impl WriteSummary {
+    /// `true` when anything was left out, marked, or unreconciled: skipped
+    /// records, spectra without a representation, dropped precursor
+    /// references or a count mismatch.
+    pub fn has_warnings(&self) -> bool {
+        self.skipped() > 0
+            || self.spectra_unknown_scan_mode > 0
+            || self.dangling_precursor_refs > 0
+            || self.spectrum_count_mismatch.is_some()
+    }
+
     /// Total records skipped (spectra plus chromatograms).
     pub fn skipped(&self) -> usize {
         self.spectra_skipped + self.chromatograms_skipped
@@ -717,15 +778,17 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
     indexed: bool,
     spool_memory_limit: usize,
 ) -> Result<Body> {
-    let meta = src.run_metadata();
+    let mut meta = src.run_metadata();
     let ids = DocumentIds::new(&meta);
     let mobility_kind = meta.mobility_array_kind;
-    let analyzer_ic_ids = analyzer_ic_table(&meta.analyzers);
+    let mut analyzer_ic_ids = analyzer_ic_table(&meta.analyzers);
     let extra_processing = src.additional_processing_steps();
     let compression = opts.compression;
     let skip = opts.record_error_policy == RecordErrorPolicy::Skip;
 
-    write_prologue(cw, &meta, &ids, indexed, &extra_processing)?;
+    // The prologue is written after the spectra have been read (it lists
+    // one instrument configuration per analyzer, including any analyzer a
+    // spectrum names that `RunMetadata::analyzers` does not).
 
     // Spectra go to the spool first so `<spectrumList count>` can be the
     // number actually written. Offsets are relative to the spool until it
@@ -734,6 +797,7 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
     let mut spool = Spool::new(spool_dir, spool_memory_limit);
     let mut summary = WriteSummary::default();
     let mut spectrum_offsets = Vec::new();
+    let mut written_ids: HashSet<String> = HashSet::new();
     for item in src.iter_spectra() {
         let rec = match item {
             Ok(rec) => rec,
@@ -743,6 +807,49 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
             }
             Err(e) => return Err(e),
         };
+        // Check the whole record before writing any of it, so a rejected
+        // record leaves no partial element in the spool.
+        let checked =
+            check_spectrum_for_write(&rec, &written_ids, mobility_kind, opts.scan_mode_policy);
+        let flags = match checked {
+            Ok(flags) => flags,
+            Err(problem) if skip => {
+                let _ = problem;
+                summary.spectra_skipped += 1;
+                summary.spectra_invalid += 1;
+                continue;
+            }
+            Err(problem) => {
+                return Err(Error::Record {
+                    record_id: rec.native_id.clone(),
+                    problem,
+                })
+            }
+        };
+        let flags = match flags {
+            WriteFlags {
+                dangling_ref: Some(reference),
+                ..
+            } if !skip => {
+                return Err(Error::Record {
+                    record_id: rec.native_id.clone(),
+                    problem: RecordProblem::DanglingPrecursorRef { reference },
+                })
+            }
+            f => f,
+        };
+        if let Some(a) = rec.analyzer {
+            if !analyzer_ic_ids.iter().any(|(known, _)| *known == a) {
+                let id = format!("IC{}", analyzer_ic_ids.len() + 2);
+                analyzer_ic_ids.push((a, id));
+            }
+        }
+        if flags.omit_representation {
+            summary.spectra_unknown_scan_mode += 1;
+        }
+        if flags.dangling_ref.is_some() {
+            summary.dangling_precursor_refs += 1;
+        }
         // Offsets point at the element's `<`, so write the indent first.
         spool.write_all(RECORD_INDENT.as_bytes())?;
         if indexed {
@@ -755,9 +862,19 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
             mobility_kind,
             &analyzer_ic_ids,
             compression,
+            &flags,
         )?;
+        written_ids.insert(rec.native_id.clone());
         summary.spectra_written += 1;
     }
+    if let Some(hint) = src.spectrum_count_hint() {
+        let accounted = summary.spectra_written + summary.spectra_skipped;
+        if hint != accounted {
+            summary.spectrum_count_mismatch = Some((hint, accounted));
+        }
+    }
+    meta.analyzers = analyzer_ic_ids.iter().map(|(a, _)| *a).collect();
+    write_prologue(cw, &meta, &ids, indexed, &extra_processing)?;
     writeln!(
         cw,
         r#"    <spectrumList count="{}" defaultDataProcessingRef="dp1">"#,
@@ -771,11 +888,36 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
     writeln!(cw, r#"    </spectrumList>"#)?;
 
     let mut chroms = Vec::new();
+    let mut chrom_ids: HashSet<String> = HashSet::new();
     for item in src.iter_chromatograms() {
-        match item {
-            Ok(rec) => chroms.push(rec),
-            Err(_) if skip => summary.chromatograms_skipped += 1,
+        let rec = match item {
+            Ok(rec) => rec,
+            Err(_) if skip => {
+                summary.chromatograms_skipped += 1;
+                continue;
+            }
             Err(e) => return Err(e),
+        };
+        let checked = if chrom_ids.contains(&rec.id) {
+            Err(RecordProblem::DuplicateId)
+        } else {
+            validate::check_chromatogram(&rec)
+        };
+        match checked {
+            Ok(()) => {
+                chrom_ids.insert(rec.id.clone());
+                chroms.push(rec);
+            }
+            Err(_) if skip => {
+                summary.chromatograms_skipped += 1;
+                summary.chromatograms_invalid += 1;
+            }
+            Err(problem) => {
+                return Err(Error::Record {
+                    record_id: rec.id,
+                    problem,
+                })
+            }
         }
     }
     let mut chromatogram_offsets = Vec::new();
@@ -1076,6 +1218,54 @@ fn analyzer_ic_table(analyzers: &[Analyzer]) -> Vec<(Analyzer, String)> {
         .collect()
 }
 
+/// How [`write_spectrum`] must deviate from the record as given.
+#[derive(Debug, Default)]
+struct WriteFlags {
+    /// Write no profile/centroid term; mark the spectrum instead.
+    omit_representation: bool,
+    /// The precursor `spectrumRef` to leave out because it is not in the
+    /// output.
+    dangling_ref: Option<String>,
+}
+
+/// Everything the writer requires of a spectrum before it writes it.
+fn check_spectrum_for_write(
+    rec: &SpectrumRecord,
+    written_ids: &HashSet<String>,
+    mobility_kind: Option<MobilityArrayKind>,
+    scan_mode_policy: ScanModePolicy,
+) -> std::result::Result<WriteFlags, RecordProblem> {
+    validate::check_spectrum(rec)?;
+    if written_ids.contains(&rec.native_id) {
+        return Err(RecordProblem::DuplicateId);
+    }
+    if rec.inv_mobility.is_some() && mobility_kind == Some(MobilityArrayKind::DriftTimeMilliseconds)
+    {
+        return Err(RecordProblem::Unsupported(
+            "spectrum-level inv_mobility with mobility_array_kind DriftTimeMilliseconds: \
+             the writer has no scan-level drift-time term"
+                .into(),
+        ));
+    }
+    let mut flags = WriteFlags::default();
+    if rec.scan_mode.is_none() {
+        match scan_mode_policy {
+            ScanModePolicy::Require => return Err(RecordProblem::UnknownScanMode),
+            ScanModePolicy::Omit => flags.omit_representation = true,
+        }
+    }
+    if let Some(reference) = rec
+        .precursor
+        .as_ref()
+        .and_then(|p| p.precursor_native_id.as_ref())
+    {
+        if !written_ids.contains(reference) {
+            flags.dangling_ref = Some(reference.clone());
+        }
+    }
+    Ok(flags)
+}
+
 /// Write one `<spectrum>`. `index` is its position in the written list.
 fn write_spectrum<W: Write>(
     out: &mut W,
@@ -1084,6 +1274,7 @@ fn write_spectrum<W: Write>(
     mobility_kind: Option<MobilityArrayKind>,
     analyzer_ic_ids: &[(Analyzer, String)],
     compression: Compression,
+    flags: &WriteFlags,
 ) -> io::Result<()> {
     const I: &str = "        ";
     let spectrum_type = if rec.ms_level <= 1 {
@@ -1111,7 +1302,10 @@ fn write_spectrum<W: Write>(
 
     match rec.scan_mode {
         Some(ScanMode::Centroid) => cv_param(out, I, cv::CENTROID_SPECTRUM, "")?,
-        _ => cv_param(out, I, cv::PROFILE_SPECTRUM, "")?,
+        Some(ScanMode::Profile) => cv_param(out, I, cv::PROFILE_SPECTRUM, "")?,
+        // The caller checked the scan-mode policy; `flags` says to mark it
+        // (userParams follow the cvParams, below).
+        _ => debug_assert!(flags.omit_representation),
     }
 
     match rec.polarity {
@@ -1121,15 +1315,24 @@ fn write_spectrum<W: Write>(
     }
 
     let tic = rec.effective_tic();
-    let (bp_mz, bp_int) = rec.effective_base_peak().unwrap_or((0.0, 0.0));
-    let (lo_mz, hi_mz) = rec.effective_mz_range().unwrap_or((0.0, 0.0));
-
     cv_param(out, I, cv::TOTAL_ION_CURRENT, format_args!("{tic:.6}"))?;
-    cv_param(out, I, cv::BASE_PEAK_MZ, format_args!("{bp_mz:.6}"))?;
-    cv_param(out, I, cv::BASE_PEAK_INTENSITY, format_args!("{bp_int:.6}"))?;
-    cv_param(out, I, cv::LOWEST_OBSERVED_MZ, format_args!("{lo_mz:.6}"))?;
-    cv_param(out, I, cv::HIGHEST_OBSERVED_MZ, format_args!("{hi_mz:.6}"))?;
+    // An empty spectrum has no base peak and no observed range: omit the
+    // terms instead of writing 0.
+    if let Some((bp_mz, bp_int)) = rec.effective_base_peak() {
+        cv_param(out, I, cv::BASE_PEAK_MZ, format_args!("{bp_mz:.6}"))?;
+        cv_param(out, I, cv::BASE_PEAK_INTENSITY, format_args!("{bp_int:.6}"))?;
+    }
+    if let Some((lo_mz, hi_mz)) = rec.effective_mz_range() {
+        cv_param(out, I, cv::LOWEST_OBSERVED_MZ, format_args!("{lo_mz:.6}"))?;
+        cv_param(out, I, cv::HIGHEST_OBSERVED_MZ, format_args!("{hi_mz:.6}"))?;
+    }
 
+    if flags.omit_representation {
+        writeln!(
+            out,
+            r#"        <userParam name="openmassspec: spectrum representation" value="unknown"/>"#
+        )?;
+    }
     if let Some(event_id) = rec.acquisition_event_id {
         writeln!(
             out,
@@ -1199,38 +1402,41 @@ fn write_spectrum<W: Write>(
         )?;
     }
 
-    writeln!(out, r#"            <scanWindowList count="1">"#)?;
-    writeln!(out, r#"              <scanWindow>"#)?;
     const W16: &str = "                ";
-    cv_param_with_unit(
-        out,
-        W16,
-        cv::SCAN_WINDOW_LOWER_LIMIT,
-        format_args!("{lo_mz:.6}"),
-        cv::MZ,
-    )?;
-    cv_param_with_unit(
-        out,
-        W16,
-        cv::SCAN_WINDOW_UPPER_LIMIT,
-        format_args!("{hi_mz:.6}"),
-        cv::MZ,
-    )?;
-    writeln!(out, r#"              </scanWindow>"#)?;
-    writeln!(out, r#"            </scanWindowList>"#)?;
+    // The scan window is the instrument's acquisition range, which is not
+    // the observed m/z range, so it is written only when the reader gave it.
+    if let Some((lo, hi)) = rec.scan_window {
+        writeln!(out, r#"            <scanWindowList count="1">"#)?;
+        writeln!(out, r#"              <scanWindow>"#)?;
+        cv_param_with_unit(
+            out,
+            W16,
+            cv::SCAN_WINDOW_LOWER_LIMIT,
+            format_args!("{lo:.6}"),
+            cv::MZ,
+        )?;
+        cv_param_with_unit(
+            out,
+            W16,
+            cv::SCAN_WINDOW_UPPER_LIMIT,
+            format_args!("{hi:.6}"),
+            cv::MZ,
+        )?;
+        writeln!(out, r#"              </scanWindow>"#)?;
+        writeln!(out, r#"            </scanWindowList>"#)?;
+    }
     writeln!(out, r#"          </scan>"#)?;
     writeln!(out, r#"        </scanList>"#)?;
 
     if let Some(pre) = rec.precursor.as_ref() {
         writeln!(out, r#"        <precursorList count="1">"#)?;
-        if let Some(ref nid) = pre.precursor_native_id {
-            writeln!(
+        match (&pre.precursor_native_id, &flags.dangling_ref) {
+            (Some(nid), None) => writeln!(
                 out,
                 r#"          <precursor spectrumRef="{}">"#,
                 escape(nid)
-            )?;
-        } else {
-            writeln!(out, r#"          <precursor>"#)?;
+            )?,
+            _ => writeln!(out, r#"          <precursor>"#)?,
         }
 
         const P: &str = "              ";
@@ -1298,7 +1504,7 @@ fn write_spectrum<W: Write>(
         // Unknown activation: emit no dissociation method rather than
         // asserting CID, which would be wrong for ETD/UVPD/... sources.
         if let Some(act) = pre.activation {
-            for term in activation_terms(act, pre.analyzer) {
+            for term in activation_terms(act) {
                 cv_param(out, P, *term, "")?;
             }
         }
@@ -1321,6 +1527,26 @@ fn write_spectrum<W: Write>(
                 )?;
             }
         }
+        // userParams follow the cvParams.
+        match pre.activation {
+            Some(act) if activation_terms(act).is_empty() => writeln!(
+                out,
+                r#"              <userParam name="openmassspec: activation" value="{}"/>"#,
+                act.as_str()
+            )?,
+            None => writeln!(
+                out,
+                r#"              <userParam name="openmassspec: activation" value="unknown"/>"#
+            )?,
+            _ => {}
+        }
+        if let Some(reference) = &flags.dangling_ref {
+            writeln!(
+                out,
+                r#"              <userParam name="openmassspec: precursor spectrumRef dropped" value="{}"/>"#,
+                escape(reference)
+            )?;
+        }
         writeln!(out, r#"            </activation>"#)?;
         writeln!(out, r#"          </precursor>"#)?;
         writeln!(out, r#"        </precursorList>"#)?;
@@ -1333,7 +1559,6 @@ fn write_spectrum<W: Write>(
         let mobility_b64_opt = rec
             .inv_mobility_per_peak
             .as_ref()
-            .filter(|v| v.len() == n_peaks)
             .map(|v| encode_f32_array(v, compression));
         let array_count = 2 + usize::from(mobility_b64_opt.is_some());
 
@@ -1632,6 +1857,7 @@ mod tests {
             base_peak_intensity: None,
             low_mz: None,
             high_mz: None,
+            scan_window: None,
             ion_injection_time_ms: None,
             inv_mobility: None,
             faims_cv,
@@ -1940,7 +2166,7 @@ mod tests {
     }
 
     #[test]
-    fn spectrum_with_unmatched_analyzer_gets_no_ref() {
+    fn analyzer_missing_from_run_metadata_gets_its_own_configuration() {
         let mut src = ToySource::new();
         src.analyzers = vec![Analyzer::FTMS];
         src.spectra = vec![SpectrumRecord {
@@ -1950,7 +2176,12 @@ mod tests {
         let mut buf = Vec::new();
         write_mzml(&mut src, &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
-        assert!(!s.contains("instrumentConfigurationRef"));
+        assert!(
+            s.contains(r#"<instrumentConfigurationList count="3">"#),
+            "{s}"
+        );
+        assert!(s.contains(r#"<scan instrumentConfigurationRef="IC3">"#));
+        assert!(s.contains("MS:1000084"), "time-of-flight component");
     }
 
     #[test]
@@ -2736,5 +2967,293 @@ mod tests {
         let chunked_digest = chunked.finalize();
 
         assert_eq!(whole_digest, chunked_digest);
+    }
+
+    // ---- record validation ------------------------------------------------
+
+    fn write_one(rec: SpectrumRecord, opts: &WriteOptions) -> Result<(String, WriteSummary)> {
+        let mut src = ToySource::new();
+        src.spectra = vec![rec];
+        let mut buf = Vec::new();
+        let summary = write_mzml_with_options(&mut src, &mut buf, opts)?;
+        Ok((String::from_utf8(buf).unwrap(), summary))
+    }
+
+    fn problem_of(r: Result<(String, WriteSummary)>) -> RecordProblem {
+        match r.unwrap_err() {
+            Error::Record { problem, .. } => problem,
+            other => panic!("expected Error::Record, got {other:?}"),
+        }
+    }
+
+    fn two_peaks() -> SpectrumRecord {
+        let mut rec = minimal_spectrum(0, None);
+        rec.mz = vec![100.0, 200.0];
+        rec.intensity = vec![1.0, 2.0];
+        rec
+    }
+
+    #[test]
+    fn mismatched_intensity_length_is_an_error() {
+        let mut rec = two_peaks();
+        rec.intensity.pop();
+        let p = problem_of(write_one(rec, &WriteOptions::new()));
+        assert_eq!(
+            p,
+            RecordProblem::ArrayLengthMismatch {
+                array: "intensity",
+                reference: "mz",
+                expected: 2,
+                found: 1
+            }
+        );
+    }
+
+    #[test]
+    fn mismatched_mobility_length_is_an_error_not_a_dropped_array() {
+        let mut rec = two_peaks();
+        rec.inv_mobility_per_peak = Some(vec![0.9]);
+        let p = problem_of(write_one(rec, &WriteOptions::new()));
+        assert!(matches!(
+            p,
+            RecordProblem::ArrayLengthMismatch {
+                array: "inv_mobility_per_peak",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn non_finite_values_are_errors() {
+        let mut nan_first = two_peaks();
+        nan_first.intensity[0] = f32::NAN;
+        assert!(matches!(
+            problem_of(write_one(nan_first, &WriteOptions::new())),
+            RecordProblem::NonFinite { .. }
+        ));
+        let mut inf_rt = two_peaks();
+        inf_rt.retention_time_sec = f64::INFINITY;
+        assert!(matches!(
+            problem_of(write_one(inf_rt, &WriteOptions::new())),
+            RecordProblem::NonFinite { .. }
+        ));
+        let mut nan_mz = two_peaks();
+        nan_mz.mz[1] = f64::NAN;
+        assert!(matches!(
+            problem_of(write_one(nan_mz, &WriteOptions::new())),
+            RecordProblem::NonFinite { .. }
+        ));
+    }
+
+    #[test]
+    fn unsorted_mz_is_an_error() {
+        let mut rec = two_peaks();
+        rec.mz = vec![200.0, 100.0];
+        assert!(matches!(
+            problem_of(write_one(rec, &WriteOptions::new())),
+            RecordProblem::UnsortedMz { index: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn duplicate_native_id_is_an_error_and_skip_counts_it() {
+        let mut src = ToySource::new();
+        let mut b = minimal_spectrum(1, None);
+        b.native_id = src.spectra[0].native_id.clone();
+        src.spectra.push(b);
+        let err = write_mzml(&mut src, &mut Vec::new()).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Record {
+                problem: RecordProblem::DuplicateId,
+                ..
+            }
+        ));
+        let opts = WriteOptions::new().with_record_error_policy(RecordErrorPolicy::Skip);
+        let summary = write_mzml_with_options(&mut src, &mut Vec::new(), &opts).unwrap();
+        assert_eq!(summary.spectra_written, 1);
+        assert_eq!(summary.spectra_skipped, 1);
+        assert_eq!(summary.spectra_invalid, 1);
+    }
+
+    fn ms2_referencing(parent: &str, index: usize) -> SpectrumRecord {
+        let mut rec = minimal_spectrum(index, None);
+        rec.ms_level = 2;
+        rec.precursor = Some(
+            crate::PrecursorInfo::default()
+                .with_target_mz(500.0)
+                .with_precursor_native_id(parent.to_string()),
+        );
+        rec
+    }
+
+    #[test]
+    fn dangling_precursor_ref_errors_and_skip_drops_it_with_a_mark() {
+        let mut src = ToySource::new();
+        src.spectra = vec![
+            minimal_spectrum(0, None),
+            ms2_referencing("controllerType=0 controllerNumber=1 scan=99", 1),
+        ];
+        let err = write_mzml(&mut src, &mut Vec::new()).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Record {
+                problem: RecordProblem::DanglingPrecursorRef { .. },
+                ..
+            }
+        ));
+
+        let opts = WriteOptions::new().with_record_error_policy(RecordErrorPolicy::Skip);
+        let mut buf = Vec::new();
+        let summary = write_mzml_with_options(&mut src, &mut buf, &opts).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(summary.dangling_precursor_refs, 1);
+        assert!(!s.contains(r#"<precursor spectrumRef"#));
+        assert!(s.contains("openmassspec: precursor spectrumRef dropped"));
+    }
+
+    #[test]
+    fn precursor_ref_to_a_written_spectrum_is_kept() {
+        let mut src = ToySource::new();
+        let parent = src.spectra[0].native_id.clone();
+        src.spectra.push(ms2_referencing(&parent, 1));
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains(&format!(r#"spectrumRef="{parent}""#)));
+    }
+
+    #[test]
+    fn unknown_scan_mode_is_an_error_by_default() {
+        let mut rec = two_peaks();
+        rec.scan_mode = None;
+        assert_eq!(
+            problem_of(write_one(rec, &WriteOptions::new())),
+            RecordProblem::UnknownScanMode
+        );
+    }
+
+    #[test]
+    fn omit_policy_writes_no_representation_term_and_marks_the_spectrum() {
+        let mut rec = two_peaks();
+        rec.scan_mode = None;
+        let opts = WriteOptions::new().with_scan_mode_policy(ScanModePolicy::Omit);
+        let (s, summary) = write_one(rec, &opts).unwrap();
+        assert!(!s.contains("MS:1000128"), "must not claim profile");
+        assert!(!s.contains("MS:1000127"), "must not claim centroid");
+        assert!(s.contains(r#"name="openmassspec: spectrum representation" value="unknown""#));
+        assert_eq!(summary.spectra_unknown_scan_mode, 1);
+        assert!(summary.has_warnings());
+    }
+
+    #[test]
+    fn declared_modes_are_written_as_declared() {
+        let mut p = two_peaks();
+        p.scan_mode = Some(ScanMode::Profile);
+        let (s, _) = write_one(p, &WriteOptions::new()).unwrap();
+        assert!(s.contains("MS:1000128") && !s.contains("MS:1000127"));
+        let (s, _) = write_one(two_peaks(), &WriteOptions::new()).unwrap();
+        assert!(s.contains("MS:1000127") && !s.contains("MS:1000128"));
+    }
+
+    #[test]
+    fn empty_spectrum_has_no_base_peak_or_range_terms() {
+        let mut rec = minimal_spectrum(0, None);
+        rec.mz.clear();
+        rec.intensity.clear();
+        let (s, _) = write_one(rec, &WriteOptions::new()).unwrap();
+        assert!(!s.contains("MS:1000504"), "base peak m/z");
+        assert!(!s.contains("MS:1000505"), "base peak intensity");
+        assert!(!s.contains("MS:1000528"), "lowest observed m/z");
+        assert!(!s.contains("MS:1000527"), "highest observed m/z");
+    }
+
+    #[test]
+    fn scan_window_comes_only_from_the_scan_window_field() {
+        let (s, _) = write_one(two_peaks(), &WriteOptions::new()).unwrap();
+        assert!(
+            !s.contains("scanWindowList"),
+            "observed range is not a scan window"
+        );
+        let (s, _) = write_one(
+            two_peaks().with_scan_window((50.0, 1500.0)),
+            &WriteOptions::new(),
+        )
+        .unwrap();
+        assert!(s.contains("scanWindowList"));
+        assert!(s.contains(r#"name="scan window lower limit" value="50.000000""#));
+        assert!(s.contains(r#"name="scan window upper limit" value="1500.000000""#));
+    }
+
+    #[test]
+    fn cid_is_resonant_cid_even_with_an_fticr_or_orbitrap_precursor_analyzer() {
+        let mut src = ToySource::new();
+        let mut rec = ms2_referencing("controllerType=0 controllerNumber=1 scan=1", 1);
+        let pre = rec.precursor.take().unwrap();
+        rec.precursor = Some(
+            pre.with_activation(Activation::CID)
+                .with_analyzer(Analyzer::FTMS),
+        );
+        src.spectra.push(rec);
+        let mut buf = Vec::new();
+        write_mzml(&mut src, &mut buf).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        let block = activation_block(&s);
+        assert!(block.contains("MS:1000133"), "{block}");
+        assert!(!block.contains("MS:1000422"), "{block}");
+    }
+
+    #[test]
+    fn activation_without_a_psi_term_or_unknown_is_marked() {
+        let s = ms2_with(Some(Activation::PD), None);
+        assert!(activation_block(&s).contains(r#"name="openmassspec: activation" value="pd""#));
+        let s = ms2_with(None, None);
+        assert!(activation_block(&s).contains(r#"name="openmassspec: activation" value="unknown""#));
+    }
+
+    #[test]
+    fn charge_without_selected_mz_is_an_error() {
+        let mut rec = minimal_spectrum(0, None);
+        rec.ms_level = 2;
+        rec.precursor = Some(
+            crate::PrecursorInfo::default()
+                .with_target_mz(500.0)
+                .with_charge(2),
+        );
+        assert_eq!(
+            problem_of(write_one(rec, &WriteOptions::new())),
+            RecordProblem::PrecursorWithoutSelectedMz { field: "charge" }
+        );
+    }
+
+    #[test]
+    fn count_hint_mismatch_is_reported_in_the_summary() {
+        let mut src = ToySource::new();
+        src.count_hint = CountHint::Fixed(5);
+        let summary = write_mzml(&mut src, &mut Vec::new()).unwrap();
+        assert_eq!(summary.spectrum_count_mismatch, Some((5, 1)));
+        assert!(summary.has_warnings());
+        src.count_hint = CountHint::Len;
+        let summary = write_mzml(&mut src, &mut Vec::new()).unwrap();
+        assert_eq!(summary.spectrum_count_mismatch, None);
+    }
+
+    #[test]
+    fn chromatogram_with_mismatched_arrays_is_an_error() {
+        let mut src = ToySource::new();
+        let mut c = tic_chromatogram(0);
+        c.intensity.pop();
+        src.chroms = vec![c];
+        let err = write_mzml(&mut src, &mut Vec::new()).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Record {
+                problem: RecordProblem::ArrayLengthMismatch { .. },
+                ..
+            }
+        ));
+        let opts = WriteOptions::new().with_record_error_policy(RecordErrorPolicy::Skip);
+        let summary = write_mzml_with_options(&mut src, &mut Vec::new(), &opts).unwrap();
+        assert_eq!(summary.chromatograms_invalid, 1);
     }
 }

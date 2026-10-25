@@ -6,6 +6,71 @@ crate adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Behavior changes
+
+Files that convert today can fail or read differently:
+
+- The mzML writer checks every spectrum and chromatogram before writing it
+  and returns `Error::Record { record_id, problem }` (new variant; the
+  `RecordProblem` enum names the cause) for: `intensity` or
+  `inv_mobility_per_peak` not the length of `mz` (the mobility array used to
+  be dropped silently); NaN or infinite values in any float field or array;
+  an `mz` array that is not ascending; a native id (or chromatogram id)
+  already written; a
+  precursor with charge, intensity or CCS but no selected-ion m/z; a
+  precursor `spectrumRef` naming a spectrum that is not in the output; and
+  spectrum-level `inv_mobility` when `mobility_array_kind` is
+  `DriftTimeMilliseconds`. With `RecordErrorPolicy::Skip` a rejected record
+  is left out and counted in `WriteSummary::spectra_skipped` and
+  `spectra_invalid` (`chromatograms_invalid`); a dangling `spectrumRef` is
+  instead dropped from the precursor, marked, and counted in
+  `dangling_precursor_refs`.
+- A spectrum whose `analyzer` is missing from `RunMetadata::analyzers` gets
+  its own `instrumentConfiguration` (it used to get none and inherit `IC1`).
+  The writer now writes the document head after it has read the spectra, so
+  when a write fails, `out` holds no head and no partial `<spectrumList>`.
+- A spectrum with `scan_mode: None` is a record error
+  (`RecordProblem::UnknownScanMode`). It used to be written as
+  "profile spectrum". `WriteOptions::with_scan_mode_policy(ScanModePolicy::Omit)`
+  writes it with no profile/centroid term and an
+  `openmassspec: spectrum representation` userParam of `unknown`, and counts
+  it in `WriteSummary::spectra_unknown_scan_mode`.
+- `Centroided` picks peaks only from spectra declared `ScanMode::Profile`.
+  `scan_mode: None` is a record error, or with
+  `Centroided::with_unknown_scan_mode(ScanModePolicy::Omit)` passes through
+  unchanged with `extra["openmassspec.centroid"] = "not applied: scan mode unknown"`.
+  A "profile" spectrum whose median m/z spacing exceeds 0.5 percent of m/z
+  is a peak list and is a record error (`RecordProblem::NotProfile`). Peak
+  weighting joins neighbours only within three median sample spacings, so
+  gaps in zero-stripped profile data are no longer averaged across.
+- `Activation::CID` is always written as collision-induced dissociation
+  (MS:1000133). It used to become beam-type CID (MS:1000422) when the
+  analyzer was FTMS; readers that know a scan is beam-type send
+  `Activation::HCD`.
+- `<scanWindowList>` is written only from the new
+  `SpectrumRecord::scan_window` field. It used to carry the observed m/z
+  range, which is not the instrument scan window.
+- Empty spectra omit the base-peak and observed-m/z-range terms instead of
+  writing 0.
+- Precursors with `Activation::PD` or no activation carry an
+  `openmassspec: activation` userParam (`pd` or `unknown`) in
+  `<activation>`.
+
+### Added
+
+- `Error::Record`, `RecordProblem`, `ScanModePolicy`,
+  `WriteOptions::scan_mode_policy`, `Centroided::with_unknown_scan_mode`.
+- `SpectrumRecord::scan_window` and `with_scan_window`.
+- `WriteSummary` fields `spectra_invalid`, `chromatograms_invalid`,
+  `spectra_unknown_scan_mode`, `dangling_precursor_refs`,
+  `spectrum_count_mismatch` (source count hint differs from spectra written
+  plus skipped), and `WriteSummary::has_warnings`.
+
+### Fixed
+
+- `SpectrumRecord::effective_base_peak` reports a NaN intensity instead of
+  ignoring it when it is the first value.
+
 ## [3.0.0] - 2026-10-11
 
 This release is intended to be the last breaking release of the core API:

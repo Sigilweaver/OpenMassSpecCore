@@ -120,8 +120,8 @@ pub struct PrecursorInfo {
     pub precursor_native_id: Option<String>,
     /// Activation (dissociation) method.
     pub activation: Option<Activation>,
-    /// Analyzer that recorded the precursor scan; needed by mzML to
-    /// disambiguate CID vs beam-type CID on FTMS instruments.
+    /// Analyzer that recorded the precursor scan. Not used to choose the
+    /// dissociation term.
     pub analyzer: Option<Analyzer>,
     /// Collision cross-sectional area of the selected ion, in square
     /// angstroms. Derived from ion-mobility measurements (Bruker 1/K0,
@@ -223,6 +223,11 @@ pub struct SpectrumRecord {
     pub low_mz: Option<f64>,
     /// Highest observed m/z. If `None`, the writer uses `mz.last()`.
     pub high_mz: Option<f64>,
+    /// Instrument scan window `(lower, upper)` in m/z: the acquisition
+    /// range, which is not the observed range of the peaks. The mzML writer
+    /// emits `scanWindowList` only from this field.
+    #[serde(default)]
+    pub scan_window: Option<(f64, f64)>,
     /// Ion injection (accumulation) time in milliseconds.
     pub ion_injection_time_ms: Option<f64>,
     /// Mean inverse reduced ion mobility (1/K0) for the spectrum, when
@@ -268,6 +273,7 @@ impl SpectrumRecord {
             base_peak_intensity: None,
             low_mz: None,
             high_mz: None,
+            scan_window: None,
             ion_injection_time_ms: None,
             inv_mobility: None,
             faims_cv: None,
@@ -307,15 +313,17 @@ impl SpectrumRecord {
         if self.intensity.is_empty() {
             return None;
         }
-        let mut best_idx = 0usize;
-        let mut best = self.intensity[0];
-        for (i, &v) in self.intensity.iter().enumerate().skip(1) {
-            if v > best {
-                best = v;
-                best_idx = i;
+        // `total_cmp` orders NaN above every number, so a NaN is a visible
+        // maximum rather than being skipped; the writer rejects non-finite
+        // values before they get here. The first maximum wins ties.
+        let (best_idx, best) = self.intensity.iter().copied().enumerate().reduce(|a, b| {
+            if b.1.total_cmp(&a.1).is_gt() {
+                b
+            } else {
+                a
             }
-        }
-        Some((self.mz[best_idx], best as f64))
+        })?;
+        Some((*self.mz.get(best_idx)?, best as f64))
     }
 
     /// `(low_mz, high_mz)`, falling back to the first/last entries in `mz`
@@ -494,6 +502,7 @@ setters!(SpectrumRecord {
     opt with_base_peak_intensity base_peak_intensity: f64,
     opt with_low_mz low_mz: f64,
     opt with_high_mz high_mz: f64,
+    opt with_scan_window scan_window: (f64, f64),
     opt with_ion_injection_time_ms ion_injection_time_ms: f64,
     opt with_inv_mobility inv_mobility: f64,
     opt with_faims_cv faims_cv: f64,
@@ -628,5 +637,13 @@ mod tests {
         metadata_json.as_object_mut().unwrap().remove("extra");
         let metadata: RunMetadata = serde_json::from_value(metadata_json).unwrap();
         assert!(metadata.extra.is_empty());
+    }
+
+    #[test]
+    fn base_peak_is_not_hidden_by_nan_at_index_zero() {
+        let rec =
+            SpectrumRecord::new(0, 1, "scan=1").with_peaks(vec![100.0, 200.0], vec![f32::NAN, 5.0]);
+        let (_, i) = rec.effective_base_peak().unwrap();
+        assert!(i.is_nan(), "a NaN must surface, not be skipped");
     }
 }

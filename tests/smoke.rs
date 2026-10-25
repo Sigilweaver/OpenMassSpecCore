@@ -22,7 +22,8 @@ impl ToySource {
             CvTerm::new("MS:1001911", "Q Exactive"),
             "toy-writer",
             "0.0.0",
-        );
+        )
+        .with_analyzers(vec![Analyzer::FTMS]);
         let s1 = SpectrumRecord::new(0, 1, "controllerType=0 controllerNumber=1 scan=1")
             .with_ms_level(MsPower::Ms1.ms_level())
             .with_polarity(Polarity::Positive)
@@ -102,8 +103,9 @@ fn writes_plain_mzml() {
     assert!(s.contains(r#"id="controllerType=0 controllerNumber=1 scan=1""#));
     assert!(s.contains(r#"id="controllerType=0 controllerNumber=1 scan=2""#));
     assert!(s.contains(r#"<cvParam cvRef="MS" accession="MS:1001911" name="Q Exactive""#));
-    // CID on FTMS analyzer should map to beam-type CID, not ion-trap CID.
-    assert!(s.contains(r#"accession="MS:1000422" name="beam-type collision-induced dissociation""#));
+    // CID stays resonant CID whatever analyzer read the fragments out.
+    assert!(s.contains(r#"accession="MS:1000133" name="collision-induced dissociation""#));
+    assert!(!s.contains("MS:1000422"));
     // s2 carries a FAIMS CV; s1 does not.
     assert!(
         s.contains(r#"accession="MS:1001581" name="FAIMS compensation voltage" value="-45.0000""#)

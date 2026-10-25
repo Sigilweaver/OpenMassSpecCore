@@ -35,6 +35,7 @@ mod error;
 mod mzml;
 mod source;
 mod types;
+mod validate;
 
 pub mod conformance;
 pub mod cv;
@@ -43,10 +44,10 @@ pub use centroid::Centroided;
 pub use enums::{
     Activation, Analyzer, Compression, MobilityArrayKind, MsPower, Polarity, ScanMode,
 };
-pub use error::{Error, Result};
+pub use error::{Error, RecordProblem, Result};
 pub use mzml::{
     write_indexed_mzml, write_indexed_mzml_with_options, write_mzml, write_mzml_with_options,
-    RecordErrorPolicy, WriteOptions, WriteSummary,
+    RecordErrorPolicy, ScanModePolicy, WriteOptions, WriteSummary,
 };
 pub use source::{ChromatogramIter, SpectrumIter, SpectrumSource};
 pub use types::{ChromatogramRecord, CvTerm, PrecursorInfo, RunMetadata, SpectrumRecord};

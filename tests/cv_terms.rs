@@ -296,15 +296,23 @@ impl SpectrumSource for EveryPath {
             Activation::SID,
             Activation::EThcD,
         ];
-        let mut out = vec![SpectrumRecord::new(0, 1, "scan=1")
+        let first = SpectrumRecord::new(0, 1, "scan=1")
             .with_polarity(Polarity::Negative)
             .with_scan_mode(ScanMode::Profile)
             .with_filter("f".to_string())
             .with_ion_injection_time_ms(1.0)
-            .with_inv_mobility(0.9)
             .with_faims_cv(-40.0)
+            .with_scan_window((50.0, 1500.0))
             .with_peaks(vec![1.0], vec![1.0])
-            .with_inv_mobility_per_peak(vec![0.9])];
+            .with_inv_mobility_per_peak(vec![0.9]);
+        // The writer has no scan-level drift-time term and rejects the
+        // combination, so only the 1/K0 run sets the scalar.
+        let first = if self.kind == MobilityArrayKind::InverseReducedVsPerCm2 {
+            first.with_inv_mobility(0.9)
+        } else {
+            first
+        };
+        let mut out = vec![first];
         for (i, act) in activations.into_iter().enumerate() {
             for (j, analyzer) in [Analyzer::FTMS, Analyzer::ITMS].into_iter().enumerate() {
                 let n = 1 + 2 * i + j;

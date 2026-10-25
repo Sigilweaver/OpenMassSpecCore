@@ -82,8 +82,8 @@ pub enum Activation {
     MPID,
     /// Electron transfer dissociation.
     ETD,
-    /// Collision-induced dissociation. On FTMS analyzers this is
-    /// conventionally rendered as beam-type CID (HCD-equivalent) in mzML.
+    /// Collision-induced dissociation (resonant). Beam-type CID is
+    /// [`Activation::HCD`]; the analyzer is not used to choose.
     CID,
     /// Electron-capture dissociation.
     ECD,
