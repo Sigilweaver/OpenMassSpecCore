@@ -115,7 +115,7 @@ fn centroid_record(
         Some(ScanMode::Centroid) => return Ok(rec),
         Some(ScanMode::Profile) => {}
         _ => {
-            if !leniency.allows(Check::UnknownScanMode) {
+            if !leniency.allows(&Check::UnknownScanMode) {
                 return Err(record_error(&rec, RecordProblem::UnknownScanMode));
             }
             rec.warnings.push(Warning::new(

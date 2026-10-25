@@ -1339,7 +1339,7 @@ fn check_spectrum_for_write(
     }
     let mut flags = WriteFlags::default();
     if rec.scan_mode.is_none() {
-        if !leniency.allows(Check::UnknownScanMode) {
+        if !leniency.allows(&Check::UnknownScanMode) {
             return Err(RecordProblem::UnknownScanMode);
         }
         flags.omit_representation = true;
@@ -1355,7 +1355,7 @@ fn check_spectrum_for_write(
         .and_then(|p| p.precursor_native_id.as_ref())
     {
         if !written_ids.contains(reference) {
-            if !leniency.allows(Check::DanglingPrecursorRef) {
+            if !leniency.allows(&Check::DanglingPrecursorRef) {
                 return Err(RecordProblem::DanglingPrecursorRef {
                     reference: reference.clone(),
                 });
@@ -1369,7 +1369,7 @@ fn check_spectrum_for_write(
     }
     if let Some(p) = &rec.precursor {
         if p.collision_energy.is_some() && p.collision_energy_unit.is_none() {
-            if !leniency.allows(Check::UnknownCollisionEnergyUnit) {
+            if !leniency.allows(&Check::UnknownCollisionEnergyUnit) {
                 return Err(RecordProblem::CollisionEnergyUnitUnknown);
             }
             flags.unitless_collision_energy = true;
