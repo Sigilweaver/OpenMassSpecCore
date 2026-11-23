@@ -4,34 +4,28 @@ All notable changes to `openmassspec-core` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 crate adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [4.0.0] - Unreleased
+
+Reader authors, users of records and Python users: see
+[MIGRATING-4.0.md](https://github.com/Sigilweaver/OpenMassSpecCore/blob/main/MIGRATING-4.0.md)
+for before and after code.
 
 ### API breaks
 
-Each is its own commit.
-
-- `Check` is open: `Check::Other(code)` and `Check::other(code)` let a
-  reader define a lenient check without a Core release. `Check` is no longer
-  `Copy`, and `Leniency::allows` takes `&Check`.
-- `SpectrumRecord::scan_window` is replaced by `scan_windows:
-  Vec<ScanWindow>` (`ScanWindow` is a `#[non_exhaustive]` struct);
-  `with_scan_window(lower, upper)` appends.
 - Collision energy is a list: `PrecursorInfo::collision_energies:
   Vec<CollisionEnergy>`, each with its own `Option<CollisionEnergyUnit>`
   (`None` = unknown). `collision_energy`, `ce_is_nce` and `with_ce_is_nce`
   are removed; `with_collision_energy(value, unit)` appends and has no
-  default unit. Serde writes the `as_str` labels of `Polarity`, `ScanMode`,
-  `Analyzer`, `Activation`, `MobilityArrayKind` and `CollisionEnergyUnit`
-  (`"positive"`, `"tof"`, ...), not the Rust variant names; each has
+  default unit. Serde writes and reads the `as_str` labels of `Polarity`,
+  `ScanMode`, `Analyzer`, `Activation`, `MobilityArrayKind` and
+  `CollisionEnergyUnit` (`"positive"`, `"tof"`, ...), not the Rust variant
+  names, so Core 3 JSON (`"Positive"`, `"TOFMS"`) no longer parses; each has
   `FromStr`.
 - `SpectrumRecord::retention_time_sec` is `Option<f64>`;
   `with_retention_time_sec` still takes an `f64`.
-- `ScanWindow`, `CollisionEnergy` and `CountMismatch` are not `Copy`.
 - `MsPower` is removed.
 - `Error::Format` and `Error::Conformance` are removed; `Error::Vendor`
-  exposes its source. `RecordProblem::Unsupported` is replaced by typed
-  variants. `Error::Record` and the struct variants of `RecordProblem` are
-  `#[non_exhaustive]`.
+  exposes its source.
 - `SpectrumIter` and `ChromatogramIter` are `Send`.
 - `WriteSummary` is not `Copy` or `Eq`, `WriteOptions` is not `Eq`, and
   `WriteSummary::spectrum_count_mismatch` is `Option<CountMismatch>`.
@@ -84,10 +78,10 @@ Files that convert today can fail or read differently:
   unless the run declares `RunMetadata::time_axis = TimeAxis::Absent`
   (then a spectrum that has one is `UnexpectedRetentionTime`). The
   conformance harness requires it on every spectrum of a stream or on none.
-- JSON written by Core 3 is rejected with a message naming the replacement
-  when it carries `scan_window` (non-null), `collision_energy` or
-  `ce_is_nce`; it used to be read with those fields silently dropped.
-  Python layers that round-trip record dicts must convert them.
+- JSON written by Core 3 is rejected: a precursor with `collision_energy` or
+  `ce_is_nce` fails with a message naming the replacement, and the old
+  variant-name labels (`"Positive"`, `"TOFMS"`) are unknown labels. Python
+  layers that round-trip record dicts must convert them.
 - A spectrum with `scan_mode: None` is a record error
   (`RecordProblem::UnknownScanMode`) that stops the write even under
   `RecordErrorPolicy::Skip`. It used to be written as "profile spectrum".
@@ -117,13 +111,16 @@ Files that convert today can fail or read differently:
 
 ### Added
 
-- `SpectrumRecord::validate` and `ChromatogramRecord::validate` (the same
-  checks the writer runs), `Error::record`, `RecordProblem::Other { code,
-  message }` and `RecordProblem::other`, so readers and the Arrow bridge
-  report problems through Core's error.
+- `Error::Record { record_id, problem }` and `RecordProblem` (both
+  `#[non_exhaustive]`), `SpectrumRecord::validate` and
+  `ChromatogramRecord::validate` (the same checks the writer runs),
+  `Error::record`, `RecordProblem::Other { code, message }` and
+  `RecordProblem::other`, so readers and the Arrow bridge report problems
+  through Core's error.
 - `Warning` and `WarningKind` (with `Other(code)` for reader-defined kinds),
   and a `warnings` field on `SpectrumRecord`, `ChromatogramRecord` and
-  `RunMetadata` (`with_warnings`, `with_warning`). The writer emits each as
+  `RunMetadata` (`with_warning` on all three, `with_warnings` on
+  `ChromatogramRecord` and `RunMetadata`). The writer emits each as
   `<userParam name="openmassspec: warning CODE" value="MESSAGE"/>` and
   counts them per code in `WriteSummary::warning_counts`.
 - `Leniency` and `Check` (`UnknownScanMode`, `DanglingPrecursorRef`,
@@ -131,13 +128,20 @@ Files that convert today can fail or read differently:
   `WriteOptions::with_leniency` and `Centroided::with_leniency` let the named
   checks continue instead of failing. Each affected record gets a `Warning`.
   Built-in check names (`as_str`, `FromStr`) are what command lines and
-  Python keywords accept.
+  Python keywords accept. `Check` is open: `Check::Other(code)` and
+  `Check::other(code)` let a reader define a lenient check without a Core
+  release. It is not `Copy`, so `Leniency::allows` takes `&Check`.
 - `WriteSummary::issues`, `issues_truncated`, `warning_counts`,
   `spectra_invalid`, `chromatograms_invalid`, `has_warnings`;
   `WriteOptions::max_reported_issues`; `RecordKind`, `WriteIssue`.
-- `ScanWindow`, `CollisionEnergy`, `CollisionEnergyUnit`, `ParseLabelError`,
-  `TimeAxis` and `RunMetadata::time_axis`. `Check::other` maps a built-in
-  code to the built-in variant; `Leniency::all()` covers built-in checks only.
+- `SpectrumRecord::scan_windows: Vec<ScanWindow>` (the instrument's
+  acquisition ranges; `with_scan_window(lower, upper)` appends),
+  `ScanWindow` and `CollisionEnergy` (neither is `Copy`),
+  `CollisionEnergyUnit`, `ParseLabelError`, `TimeAxis` and
+  `RunMetadata::time_axis`. `Check::other` maps a built-in code to the
+  built-in variant; `Leniency::all()` covers built-in checks only.
+- `MIGRATING-4.0.md`: before and after code for reader authors, users of
+  records and Python users.
 - `openmassspec-arrow`: columns `precursor_collision_energies`,
   `scan_windows` and `warnings` (code and message), appended at the end;
   `openmassspec.schema_version` in the schema metadata with
@@ -146,8 +150,7 @@ Files that convert today can fail or read differently:
 
 ## [3.0.0] - 2026-10-11
 
-This release is intended to be the last breaking release of the core API:
-public types are `#[non_exhaustive]`, so later field, variant, and CV-term
+Public types are `#[non_exhaustive]`, so later field, variant, and CV-term
 additions are minor releases. Reader authors: see
 [MIGRATING-3.0.md](MIGRATING-3.0.md) for step-by-step instructions.
 
