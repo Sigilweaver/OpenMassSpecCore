@@ -488,7 +488,7 @@ pub enum RecordErrorPolicy {
     /// `out`, and reading the spool back into `out` (flushing it, reading it,
     /// the byte-count check, removing it). The writer writes the head and the
     /// opening `<spectrumList>` tag, then copies the spool, so a spool
-    /// read-back failure leaves them in `out` with some or all spectra. A
+    /// read-back failure leaves them in `out` with none, some or all spectra. A
     /// chromatogram error leaves the head and the complete `<spectrumList>`.
     /// Either way there is no `</run>` and, for indexed output, no
     /// `<indexList>`. A caller that needs all or nothing writes to a

@@ -669,7 +669,7 @@ and 4.x:
   incomplete document, with no `</run>`: a chromatogram error leaves the head
   and the complete `<spectrumList>`, an I/O error from `out` leaves what it
   accepted, and a failure reading the spool back (flush, read, byte count,
-  removal) leaves the head and an open `<spectrumList>`, with some or all
+  removal) leaves the head and an open `<spectrumList>`, with none, some or all
   spectra. Write to a temporary file and rename it on success if you need all
   or nothing.
 - `SpectrumRecord::effective_base_peak` reports a NaN intensity instead of
