@@ -1,5 +1,5 @@
 # Publish openmassspec-core, then openmassspec-arrow (which depends on it),
-# to crates.io on tag push.
+# to crates.io on tag push, then create the GitHub Release.
 #
 # Requires repository secret CARGO_REGISTRY_TOKEN with publish access
 # to both crates on crates.io.
@@ -30,3 +30,10 @@ jobs:
       - run: cargo publish -p openmassspec-arrow
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  github-release:
+    name: Create the GitHub Release
+    needs: [cargo-publish]
+    permissions:
+      contents: write
+    uses: Sigilweaver/.github/.github/workflows/github-release.yml@main
