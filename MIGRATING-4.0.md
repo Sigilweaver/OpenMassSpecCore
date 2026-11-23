@@ -652,9 +652,14 @@ and 4.x:
   `openmassspec: activation` userParam, and stepped collision energies are
   all written.
 - Warnings are written as `openmassspec: warning CODE` userParams.
-- The writer writes the document head after it has read the spectra, so a
-  failed write leaves no head and no partial `<spectrumList>` in `out`
-  (3.0.0 left a truncated document).
+- The writer writes the document head after it has read and checked all
+  spectra. A spectrum that fails (a source `Err`, a rejected record, the
+  spectrum-count check, the spool file) therefore leaves `out` empty, for a
+  `Vec` and for a `File`; 3.0.0 left a truncated document. A failure after
+  the head is written (a chromatogram error, or an I/O error from `out`)
+  still leaves an incomplete document: the head and the complete
+  `<spectrumList>` but no `</run>`. Write to a temporary file and rename it
+  on success if you need all or nothing.
 - `SpectrumRecord::effective_base_peak` reports a NaN intensity instead of
   skipping it when it comes first.
 

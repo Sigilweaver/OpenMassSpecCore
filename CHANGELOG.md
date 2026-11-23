@@ -70,8 +70,11 @@ Files that convert today can fail or read differently:
   warning and `WriteSummary::spectrum_count_mismatch`).
 - A spectrum whose `analyzer` is missing from `RunMetadata::analyzers` gets
   its own `instrumentConfiguration` (it used to get none and inherit `IC1`).
-  The writer now writes the document head after it has read the spectra, so
-  when a write fails, `out` holds no head and no partial `<spectrumList>`.
+  The writer now writes the document head after it has read and checked the
+  spectra, so when a spectrum fails, `out` is empty and holds no partial
+  `<spectrumList>`; a failure in the chromatogram list or an I/O error from
+  `out` still leaves an incomplete document (the head and the complete
+  spectrum list).
   `<fileContent>` declares only the spectrum kinds written.
 - A spectrum with no `retention_time_sec` is `RecordProblem::MissingRetentionTime`
   unless the run declares `RunMetadata::time_axis = TimeAxis::Absent`
