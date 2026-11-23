@@ -481,12 +481,17 @@ pub enum RecordErrorPolicy {
     /// and checks all spectra before it writes the document head, so an
     /// error in that phase (the source yields `Err` for a spectrum, a
     /// spectrum is rejected, the spectrum-count check fails, the spool file
-    /// fails) leaves `out` untouched: no bytes are written, whether `out` is
-    /// a `Vec` or a `File`. An error after the head is written (a chromatogram
-    /// the source cannot yield or the writer rejects, or an I/O error from
-    /// `out`) leaves an incomplete document: the head, and for a chromatogram
-    /// error the complete `<spectrumList>`, but no `</run>` and, for indexed
-    /// output, no `<indexList>`. A caller that needs all or nothing writes to a
+    /// cannot be created or written) leaves `out` untouched: no bytes are
+    /// written, whether `out` is a `Vec` or a `File`. An error after the head
+    /// is written leaves an incomplete document. That covers a chromatogram
+    /// the source cannot yield or the writer rejects, an I/O error from
+    /// `out`, and reading the spool back into `out` (flushing it, reading it,
+    /// the byte-count check, removing it). The writer writes the head and the
+    /// opening `<spectrumList>` tag, then copies the spool, so a spool
+    /// read-back failure leaves them in `out` with some or all spectra. A
+    /// chromatogram error leaves the head and the complete `<spectrumList>`.
+    /// Either way there is no `</run>` and, for indexed output, no
+    /// `<indexList>`. A caller that needs all or nothing writes to a
     /// temporary file and renames it on success.
     #[default]
     Fail,

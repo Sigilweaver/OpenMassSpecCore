@@ -249,8 +249,13 @@ bridge and `Centroided` share. Besides the ones above and those in 1.3 and
 | Spectrum-level `inv_mobility` set while the run's `mobility_array_kind` is `DriftTimeMilliseconds` | `RecordProblem::ScanMobilityKindUnsupported`       | Leave `inv_mobility` unset; carry drift times per peak in `inv_mobility_per_peak`                         |
 | `intensity` or `inv_mobility_per_peak` not the length of `mz`                                      | `RecordProblem::ArrayLengthMismatch`               | Fix the decoder; the mobility array used to be dropped silently                                           |
 | NaN or infinite values, an `mz` array that is not ascending, `ms_level` 0                          | `RecordProblem::NonFinite`, `UnsortedMz`, `MsLevelZero` | Emit sorted arrays from the decoder (see below)                                                        |
+| A chromatogram whose `intensity` is not the length of `time_sec`                                   | `RecordProblem::ArrayLengthMismatch`               | Fix the decoder                                                                                            |
+| NaN or infinite values in a chromatogram's `time_sec`, `intensity`, `precursor_mz` or `product_mz` | `RecordProblem::NonFinite`                         | Reject or repair in the decoder                                                                            |
+| Two chromatograms with the same `id`                                                               | `RecordProblem::DuplicateId`                       | Give each chromatogram a distinct id                                                                       |
 
-No `Check` covers these. In particular unsorted m/z cannot be allowed: no
+`ChromatogramRecord::validate` runs the chromatogram length and finite-value
+checks; the writer adds the repeated-id check. No `Check` covers any of
+them. In particular unsorted m/z cannot be allowed: no
 `Leniency` and no `--allow` name relaxes it, so a reader must emit `mz`
 sorted ascending, with `intensity` and `inv_mobility_per_peak` reordered
 with it, and must not rely on the caller to opt in. The same holds for
@@ -434,6 +439,9 @@ impl std::fmt::Display for Truncated {
 impl std::error::Error for Truncated {}
 
 let whole_file: Error = Error::vendor(Truncated);
+// `Error::Vendor` exposes your error through `source()`, so callers can walk
+// the chain and downcast.
+assert!(std::error::Error::source(&whole_file).unwrap().is::<Truncated>());
 let one_record: Error = Error::record(
     "scan=7",
     RecordProblem::other("myreader.bad_header", "header checksum mismatch"),
@@ -597,8 +605,9 @@ assert!("TOFMS".parse::<Analyzer>().is_err());
 Records that Core 3 wrote with a silent default are errors now: an
 unknown scan mode, a collision energy with no unit, a missing retention
 time, ms level 0, unsorted or non-finite m/z, mismatched arrays, a repeated
-native id (none of the array and numeric problems has a `Check`, so a caller
-cannot allow them), and a precursor reference to a spectrum that has not been
+native id, or a chromatogram with mismatched arrays, non-finite values or a
+repeated id (none of the array and numeric problems has a `Check`, so a
+caller cannot allow them), and a precursor reference to a spectrum that has not been
 written yet (the writer resolves `precursor_native_id` against spectra it
 has already written, so stream order matters; see 1.6). The record checks
 and what each asks of the reader are in 1.5. The "Behavior changes" list in
@@ -654,12 +663,15 @@ and 4.x:
 - Warnings are written as `openmassspec: warning CODE` userParams.
 - The writer writes the document head after it has read and checked all
   spectra. A spectrum that fails (a source `Err`, a rejected record, the
-  spectrum-count check, the spool file) therefore leaves `out` empty, for a
-  `Vec` and for a `File`; 3.0.0 left a truncated document. A failure after
-  the head is written (a chromatogram error, or an I/O error from `out`)
-  still leaves an incomplete document: the head and the complete
-  `<spectrumList>` but no `</run>`. Write to a temporary file and rename it
-  on success if you need all or nothing.
+  spectrum-count check, the spool file cannot be created or written)
+  therefore leaves `out` empty, for a `Vec` and for a `File`; 3.0.0 left a
+  truncated document. A failure after the head is written still leaves an
+  incomplete document, with no `</run>`: a chromatogram error leaves the head
+  and the complete `<spectrumList>`, an I/O error from `out` leaves what it
+  accepted, and a failure reading the spool back (flush, read, byte count,
+  removal) leaves the head and an open `<spectrumList>`, with some or all
+  spectra. Write to a temporary file and rename it on success if you need all
+  or nothing.
 - `SpectrumRecord::effective_base_peak` reports a NaN intensity instead of
   skipping it when it comes first.
 
