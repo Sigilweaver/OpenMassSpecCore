@@ -11,8 +11,10 @@ What changes between `openmassspec-core` 3.0.0 and 4.0.0, and between
 
 The complete list of changes is the 4.0.0 entry of
 [CHANGELOG.md](CHANGELOG.md). This note shows the edits each change asks of
-you. Every `rust` block that follows a "After" heading is compiled as a doc
-test in CI; blocks marked "Before" show 3.0.0 code and are not compiled.
+you. Every `rust` block that follows an "After" heading is compiled as a doc
+test by the unpublished `migrating-doctests` crate in this workspace, which
+`cargo test --workspace` runs in CI; blocks marked "Before" show 3.0.0 code
+and are not compiled.
 
 Three changes decide most of the work:
 
@@ -23,6 +25,9 @@ Three changes decide most of the work:
 - Iterators are `Send`, so a reader generic over `Read + Seek` adds `Send`
   to its bounds. That is a public signature change in the reader, so the
   reader needs a major release too.
+- The mzML writer and `Centroided` check each record, and some output
+  changes with no compile error. Section 1.5, 1.6 and 1.10 list them for
+  reader authors and 2.3 for everyone who compares output.
 
 ## 1. Reader authors
 
@@ -41,10 +46,12 @@ openmassspec-arrow = "4.0.0"
 ### 1.2 Iterators are `Send`
 
 `SpectrumIter` and `ChromatogramIter` are `Box<dyn Iterator<..> + Send + 'a>`.
-The iterator borrows `&mut self`, so everything the reader holds must be
-`Send`. A reader generic over its byte source adds `Send` to the bound, on
-the struct and on the impl. A field that is not `Send` (`Rc`, `RefCell`,
-a raw pointer) is replaced by `Arc`, `Mutex` or a plain owned value.
+The iterator borrows `&mut self` and moves what it captures, so whatever it
+captures must be `Send`. A reader generic over its byte source captures that
+source, so it adds `Send` to the bound, on the struct and on the impl. A
+captured value that is not `Send` (`Rc`, `RefCell`, a raw pointer) is
+replaced by `Arc`, `Mutex` or a plain owned value, or kept out of the
+iterator.
 
 Before:
 
@@ -153,7 +160,7 @@ as a unit-less `userParam` and adds a warning to the record.
 
 `SpectrumRecord::retention_time_sec` is `Option<f64>`, and
 `SpectrumRecord::new` leaves it `None` (it used to set `0.0`). The setter
-still takes seconds as an `f64` and also accepts an `Option<f64>`.
+takes seconds as an `f64` or an `Option<f64>` (`impl Into<Option<f64>>`).
 
 A spectrum with no retention time is an error
 (`RecordProblem::MissingRetentionTime`) unless the run declares that the
@@ -201,8 +208,16 @@ Set `scan_mode` on every spectrum from what the file declares. A spectrum
 with `scan_mode: None` is `RecordProblem::UnknownScanMode` and stops the
 write even under `RecordErrorPolicy::Skip`. Core 3 wrote it as a profile
 spectrum. A reader that cannot tell leaves `None` and lets the caller opt in
-with `Check::UnknownScanMode` (1.6). `Centroided` picks peaks only from
-spectra declared `ScanMode::Profile`.
+with `Check::UnknownScanMode` (1.6).
+
+`Centroided` picks peaks only from spectra declared `ScanMode::Profile`, and
+runs the record checks below first. It rejects a spectrum labelled profile
+whose median m/z spacing is more than 0.5 percent of m/z
+(`RecordProblem::NotProfile`), which is how a peak list mislabelled as
+profile shows up: fix the label in the reader (`ScanMode::Centroid`) instead
+of working around it. It joins neighbouring points into one peak only
+within three median spacings, so a gap in zero-stripped profile data splits
+peaks where Core 3 averaged across it.
 
 `SpectrumRecord::scan_windows` is new: the instrument's acquisition ranges
 in m/z, one entry per window. The writer emits `<scanWindowList>` only from
@@ -223,6 +238,28 @@ assert_eq!(rec.scan_windows.len(), 1);
 assert!(rec.validate().is_ok());
 ```
 
+`SpectrumRecord::validate` runs the record checks that the writer, the Arrow
+bridge and `Centroided` share. Besides the ones above and those in 1.3 and
+1.4, a reader will meet these:
+
+| Trigger                                                                                           | Error                                              | What the reader does                                                                                       |
+| ------------------------------------------------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| A scan window with a negative lower limit, `lower > upper`, or a non-finite limit                  | `RecordProblem::InvalidScanWindow` (`NonFinite`)   | Fix the decoder; add no window when the file states none                                                  |
+| Precursor `charge`, `intensity` or `ccs` set while `selected_mz` is `None`                         | `RecordProblem::PrecursorWithoutSelectedMz`        | Set `selected_mz` from the file, or leave the dependent field unset                                       |
+| Spectrum-level `inv_mobility` set while the run's `mobility_array_kind` is `DriftTimeMilliseconds` | `RecordProblem::ScanMobilityKindUnsupported`       | Leave `inv_mobility` unset; carry drift times per peak in `inv_mobility_per_peak`                         |
+| `intensity` or `inv_mobility_per_peak` not the length of `mz`                                      | `RecordProblem::ArrayLengthMismatch`               | Fix the decoder; the mobility array used to be dropped silently                                           |
+| NaN or infinite values, an `mz` array that is not ascending, `ms_level` 0                          | `RecordProblem::NonFinite`, `UnsortedMz`, `MsLevelZero` | Emit sorted arrays from the decoder (see below)                                                        |
+
+No `Check` covers these. In particular unsorted m/z cannot be allowed: no
+`Leniency` and no `--allow` name relaxes it, so a reader must emit `mz`
+sorted ascending, with `intensity` and `inv_mobility_per_peak` reordered
+with it, and must not rely on the caller to opt in. The same holds for
+non-finite values, mismatched array lengths and `ms_level` 0.
+
+The scan-level drift-time row affects readers of drift-time mobility data
+(Waters-style): `RunMetadata::mobility_array_kind` is the run-wide kind, and
+`None` means 1/K0.
+
 ### 1.6 Leniency, `Check` and warnings
 
 By default the writer and `Centroided` reject what they cannot represent
@@ -232,9 +269,68 @@ each affected record gets a `Warning`:
 | Check                          | Strict mode                                | Lenient mode                                    |
 | ------------------------------ | ------------------------------------------ | ----------------------------------------------- |
 | `UnknownScanMode`              | record error                               | written with no profile or centroid term        |
-| `DanglingPrecursorRef`         | record error                               | the `spectrumRef` is dropped                    |
+| `DanglingPrecursorRef`         | record error: the referenced spectrum is not among those already written | the `spectrumRef` is dropped          |
 | `UnknownCollisionEnergyUnit`   | record error                               | value written as a unit-less `userParam`        |
 | `SpectrumCountShortfall`       | `Error::SpectrumCountShortfall`            | run-level warning and `WriteSummary::spectrum_count_mismatch` |
+
+Precursor references depend on stream order. The writer resolves
+`PrecursorInfo::precursor_native_id` only against spectra it has already
+written, so a precursor that names a spectrum later in the stream, or one
+that was skipped or never yielded, is dangling. An MS2 spectrum yielded
+before its MS1 is a `RecordProblem::DanglingPrecursorRef` even though the MS1
+appears later in the output. A reader yields each MS1 before the spectra
+that reference it, or leaves `precursor_native_id` unset when the parent is
+not part of the stream.
+
+```rust
+use openmassspec_core::{
+    write_mzml, CvTerm, Error, PrecursorInfo, RecordProblem, RunMetadata, ScanMode,
+    SpectrumIter, SpectrumRecord, SpectrumSource,
+};
+
+struct Fixed(Vec<SpectrumRecord>);
+
+impl SpectrumSource for Fixed {
+    fn run_metadata(&self) -> RunMetadata {
+        RunMetadata::new(
+            "run.raw",
+            CvTerm::new("MS:1000563", "Thermo RAW format"),
+            CvTerm::new("MS:1000768", "Thermo nativeID format"),
+            CvTerm::new("MS:1000483", "Thermo Fisher Scientific instrument model"),
+            "my-reader",
+            "1.0.0",
+        )
+    }
+
+    fn iter_spectra<'a>(&'a mut self) -> SpectrumIter<'a> {
+        Box::new(self.0.clone().into_iter().map(Ok))
+    }
+}
+
+fn spectrum(index: usize, id: &str) -> SpectrumRecord {
+    SpectrumRecord::new(index, index as u32 + 1, id)
+        .with_scan_mode(ScanMode::Centroid)
+        .with_retention_time_sec(index as f64)
+        .with_peaks(vec![100.0], vec![1.0])
+}
+
+let ms1 = spectrum(0, "scan=1");
+let ms2 = spectrum(1, "scan=2")
+    .with_ms_level(2)
+    .with_precursor(PrecursorInfo::default().with_precursor_native_id("scan=1".to_string()));
+
+// The MS2 comes first: its parent is not written yet.
+let mut wrong_order = Fixed(vec![ms2.clone(), ms1.clone()]);
+let err = write_mzml(&mut wrong_order, &mut Vec::new()).unwrap_err();
+assert!(matches!(
+    err,
+    Error::Record { problem: RecordProblem::DanglingPrecursorRef { .. }, .. }
+));
+
+// Parent first: fine.
+let mut right_order = Fixed(vec![ms1, ms2]);
+write_mzml(&mut right_order, &mut Vec::new()).unwrap();
+```
 
 `Check` is open. A reader defines its own with `Check::other` and a
 namespaced code, parses its own names, and attaches a warning with
@@ -267,14 +363,14 @@ if leniency.allows(&mine) {
 }
 ```
 
-`Centroided::with_leniency` takes the same `Leniency`.
+`Centroided::with_leniency` takes the same `Leniency`; with
+`Check::UnknownScanMode` allowed it passes a spectrum of unknown scan mode
+through unchanged and adds a `centroid_not_applied` warning.
 
 ### 1.7 Removed `Copy` and `Eq` impls
 
 `WriteSummary` is no longer `Copy` or `Eq`, and `WriteOptions` is no longer
-`Eq`. The types added in 4.0 (`Check`, `Leniency`, `ScanWindow`,
-`CollisionEnergy`, `CountMismatch`) are not `Copy` either. Clone where you
-copied, and pass `&Check` to `Leniency::allows`.
+`Eq`. Clone where you copied.
 
 Before:
 
@@ -287,7 +383,7 @@ if summary.skipped() > 0 { /* ... */ }   // used after the move
 After:
 
 ```rust
-use openmassspec_core::{Check, Leniency, WriteSummary};
+use openmassspec_core::WriteSummary;
 
 fn log(summary: WriteSummary) {
     let _ = summary;
@@ -296,9 +392,6 @@ fn log(summary: WriteSummary) {
 let summary = WriteSummary::default();
 log(summary.clone());
 if summary.skipped() > 0 { /* ... */ }
-
-let leniency = Leniency::strict().with(Check::DanglingPrecursorRef);
-assert!(leniency.allows(&Check::DanglingPrecursorRef));
 ```
 
 ### 1.8 `MsPower` is removed
@@ -349,7 +442,20 @@ let one_record: Error = Error::record(
 
 `SpectrumRecord::validate` and `ChromatogramRecord::validate` run the checks
 the writer runs, so a reader's tests can assert that every record it yields
-is writable. `conformance::assert_source_invariants` applies them too.
+is writable. `conformance::assert_source_invariants` and
+`assert_iter_invariants` are stricter than in 3.0.0; a reader's conformance
+test can fail on data it passed before:
+
+- it runs `SpectrumRecord::validate` on every record
+  (`ConformanceError::InvalidRecord`);
+- it rejects a repeated native id (`ConformanceError::DuplicateNativeId`);
+- it requires a retention time on every spectrum or on none. For
+  `assert_source_invariants` the run's `time_axis` decides (`Retention`: every
+  spectrum; `Absent`: none); `assert_iter_invariants` has no run, so the first
+  spectrum decides (`InvalidRecord` with `MissingRetentionTime` or
+  `UnexpectedRetentionTime`);
+- it rejects a declared base-peak intensity on an empty spectrum, which it
+  used to accept (`BasePeakIntensityMismatch`, computed 0).
 
 If you use `openmassspec-arrow`, everything moves into a module named for
 the arrow-rs release it is built against (feature `arrow-60`, on by
@@ -358,7 +464,11 @@ default). Only version-independent items stay at the crate root:
 `check_schema_version_value` and `SchemaVersionError`. A newer arrow-rs
 major arrives as a new module beside `arrow_60`, so these paths stay valid.
 `push` validates the record and returns a `Result`, and `BatchError` (one
-per module) replaces `ArrowError` as the error type.
+per module) replaces `ArrowError` as the error type. `push` rejects what
+`SpectrumRecord::validate` rejects and a native id the builder has already
+seen, and returns `BatchError::ColumnRange` for an `index` that does not fit
+`u32` or an `ms_level` that does not fit `u8`, which 3.0.0 truncated with
+`as`.
 
 Before:
 
@@ -390,6 +500,31 @@ fn rows(records: &[SpectrumRecord]) -> Result<usize, BatchError> {
 
 let record = SpectrumRecord::new(0, 1, "scan=1").with_peaks(vec![100.0], vec![5.0]);
 assert_eq!(rows(&[record]).unwrap(), 1);
+```
+
+### 1.10 Output that changes with no compile error
+
+Some changes show up only in the mzML. The complete list is in 2.3. Two of
+them belong to the reader:
+
+- `Activation::CID` is always written as collision-induced dissociation
+  (`MS:1000133`). 3.0.0 wrote beam-type CID (`MS:1000422`) when the analyzer
+  was `FTMS`, so a reader that sent `CID` for Orbitrap beam-type scans now
+  gets resonant CID in the file. A reader that knows a scan is beam-type
+  sends `Activation::HCD`; one that knows it is resonant keeps `CID`.
+  `PrecursorInfo::analyzer` no longer chooses the term.
+- `<scanWindowList>` comes only from `scan_windows` (1.5), and a precursor
+  whose activation is `Activation::PD` or unset gets an
+  `openmassspec: activation` userParam (`pd` or `unknown`).
+
+```rust
+use openmassspec_core::{Activation, Analyzer, PrecursorInfo};
+
+// An Orbitrap beam-type scan: HCD, not CID.
+let beam = PrecursorInfo::default()
+    .with_activation(Activation::HCD)
+    .with_analyzer(Analyzer::FTMS);
+assert_eq!(beam.activation, Some(Activation::HCD));
 ```
 
 ## 2. Users of records
@@ -462,9 +597,17 @@ assert!("TOFMS".parse::<Analyzer>().is_err());
 Records that Core 3 wrote with a silent default are errors now: an
 unknown scan mode, a collision energy with no unit, a missing retention
 time, ms level 0, unsorted or non-finite m/z, mismatched arrays, a repeated
-native id, and a precursor reference to a spectrum that is not in the
-output. The "Behavior changes" list in [CHANGELOG.md](CHANGELOG.md) has all
-of them.
+native id (none of the array and numeric problems has a `Check`, so a caller
+cannot allow them), and a precursor reference to a spectrum that has not been
+written yet (the writer resolves `precursor_native_id` against spectra it
+has already written, so stream order matters; see 1.6). The record checks
+and what each asks of the reader are in 1.5. The "Behavior changes" list in
+[CHANGELOG.md](CHANGELOG.md) has all of them.
+
+A source whose `spectrum_count_hint` is larger than the number of spectra it
+yields, with no `Err` for the difference, is `Error::SpectrumCountShortfall`
+unless `Check::SpectrumCountShortfall` is allowed (1.6), so a reader's hint
+must not exceed what it yields, or be `None`.
 
 `WriteSummary` says what happened. With `RecordErrorPolicy::Skip` a
 rejected record is left out and counted, and its cause is kept in `issues`:
@@ -480,7 +623,7 @@ fn convert<S: SpectrumSource>(source: &mut S, out: &mut Vec<u8>) -> openmassspec
     for issue in &summary.issues {
         eprintln!("{:?} {}: {}", issue.kind, issue.position, issue.cause);
     }
-    if summary.has_warnings() {
+    if summary.skipped() > 0 {
         eprintln!("{} records skipped", summary.skipped());
     }
     Ok(())
@@ -488,7 +631,32 @@ fn convert<S: SpectrumSource>(source: &mut S, out: &mut Vec<u8>) -> openmassspec
 ```
 
 To accept a specific kind of record instead of skipping, allow its `Check`
-(1.6).
+(1.6). `WriteSummary::has_warnings` is true when anything was skipped,
+flagged or left unreconciled; `warning_counts` counts the warnings per code.
+
+Output that changes without an error, for anyone who compares mzML from 3.x
+and 4.x:
+
+- `Activation::CID` is always `MS:1000133`. 3.0.0 wrote `MS:1000422`
+  (beam-type) for it when the analyzer was `FTMS`; readers that know a scan
+  is beam-type now send `HCD`, so the same file can differ in the activation
+  term.
+- `<scanWindowList>` is written only from `scan_windows`. It used to carry
+  the observed m/z range. Empty spectra omit the base-peak and observed-range
+  terms instead of writing 0, and a spectrum with no retention time has no
+  scan start time.
+- A spectrum whose analyzer is not in `RunMetadata::analyzers` gets its own
+  `instrumentConfiguration` (it used to inherit `IC1`). `<fileContent>`
+  declares only the spectrum kinds written.
+- Precursors with `Activation::PD` or no activation carry an
+  `openmassspec: activation` userParam, and stepped collision energies are
+  all written.
+- Warnings are written as `openmassspec: warning CODE` userParams.
+- The writer writes the document head after it has read the spectra, so a
+  failed write leaves no head and no partial `<spectrumList>` in `out`
+  (3.0.0 left a truncated document).
+- `SpectrumRecord::effective_base_peak` reports a NaN intensity instead of
+  skipping it when it comes first.
 
 ### 2.4 Arrow batches
 
@@ -497,13 +665,16 @@ The module paths and error type are in 1.9. The columns change as follows:
 | Column                                | 3.0.0              | 4.0.0                                                    |
 | ------------------------------------- | ------------------ | -------------------------------------------------------- |
 | `retention_time_sec`                  | `Float64`, not null | `Float64`, nullable                                      |
-| `precursor_ce_is_nce`                 | `UInt8`            | removed                                                  |
-| `precursor_collision_energy_unit`     | -                  | `Utf8` (`"ev"`, `"nce"`), null when unknown; follows `precursor_collision_energy` |
+| `precursor_ce_is_nce` (24th column, index 23) | `UInt8`    | replaced in place by `precursor_collision_energy_unit`   |
+| `precursor_collision_energy_unit` (index 23)  | -          | `Utf8` (`"ev"`, `"nce"`), null when unknown; follows `precursor_collision_energy` |
 | `precursor_collision_energies`        | -                  | `LargeList<Struct{value: Float64, unit: Utf8}>`, every energy |
 | `scan_windows`                        | -                  | `LargeList<Struct{lower: Float64, upper: Float64}>`      |
 | `warnings`                            | -                  | `LargeList<Struct{code: Utf8, message: Utf8}>` (spectrum warnings) |
 
-`precursor_collision_energy` and its unit column hold the first energy;
+A consumer that finds columns by position instead of by name breaks at index
+23, where a `UInt8` flag became a `Utf8` label. The three new list columns
+are appended at the end. `precursor_collision_energy` and its unit column
+hold the first energy;
 `precursor_collision_energies` holds all of them. The schema metadata
 carries `openmassspec.schema_version` (currently 1). A reader accepts that
 version or older and rejects a newer one. Arrow data written by the 3.x
@@ -513,10 +684,11 @@ it again from the source file.
 ## 3. Python users
 
 OpenTFRaw, OpenWRaw and OpenTimsTDF build their record dicts from Core's
-serialized form, so the changes in 2.1 and 2.2 show up as dict keys.
-OpenARaw, OpenSXRaw and OpenSZRaw build theirs by hand. The table is the
-shape Core produces; the CHANGELOG of each reader names the release that
-returns it.
+serialized form, so the changes in 2.1 and 2.2 show up as dict keys, and
+the table below describes those three. OpenARaw, OpenSXRaw, OpenSZRaw and
+the `openmassspec` package build their dicts by hand and decide their own
+keys and labels in their own releases; their CHANGELOGs and migration notes
+document them.
 
 | Before                                                  | After                                                                  |
 | ------------------------------------------------------- | ---------------------------------------------------------------------- |
@@ -563,7 +735,5 @@ opt in by name (`unknown_scan_mode`, `dangling_precursor_ref`,
 `unknown_collision_energy_unit`, `spectrum_count_shortfall`); the reader's
 documentation says how.
 
-Arrow output follows 2.4. The six reader packages do not return Arrow.
-`read_arrow` in the `openmassspec` package returns what the bridge builds,
-so a build against Core 4 has the new columns and the schema version, and
-rejects Arrow files written with the 3.x bridge.
+The six reader packages do not return Arrow. Arrow output of the bridge
+follows 2.4.
