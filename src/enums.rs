@@ -204,7 +204,8 @@ impl MobilityArrayKind {
     }
 }
 
-/// Unit of [`PrecursorInfo::collision_energy`](crate::PrecursorInfo::collision_energy).
+/// Unit of a [`CollisionEnergy`](crate::CollisionEnergy) in
+/// [`PrecursorInfo::collision_energies`](crate::PrecursorInfo::collision_energies).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum CollisionEnergyUnit {

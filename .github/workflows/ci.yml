@@ -3,7 +3,7 @@
 # Workspace: openmassspec-core plus crates/openmassspec-arrow. Runs fmt + clippy + test
 # on Linux and macOS, a 1.88 MSRV check, and mzML schema validation of
 # the canonical writer's output against the vendored PSI-MS XSD, and a
-# cargo-semver-checks run against the latest crates.io release.
+# cargo-semver-checks run per crate against its latest crates.io release.
 
 name: CI
 
@@ -84,3 +84,15 @@ jobs:
         uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
           package: openmassspec-core
+
+  # The same check for the Arrow bridge, which has its own version line.
+  semver-checks-arrow:
+    name: Semver checks (arrow)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: cargo semver-checks
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: openmassspec-arrow

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [".", "crates/openmassspec-arrow"]
+members = [".", "crates/openmassspec-arrow", "crates/migrating-doctests"]
 
 [workspace.package]
 version = "4.0.0"

@@ -319,8 +319,8 @@ pub struct SpectrumRecord {
 }
 
 impl SpectrumRecord {
-    /// A record with the identifying fields set, `ms_level` 1, retention
-    /// time 0, no peaks, and every optional field `None`. Fill in the rest
+    /// A record with the identifying fields set, `ms_level` 1, no peaks, and
+    /// every optional field `None` (including `retention_time_sec`). Fill in the rest
     /// with the `with_*` setters or by assigning the public fields.
     pub fn new(index: usize, scan_number: u32, native_id: impl Into<String>) -> Self {
         Self {
@@ -375,7 +375,7 @@ impl SpectrumRecord {
     ///
     /// # Errors
     ///
-    /// The first problem found, as a [`RecordProblem`].
+    /// The first problem found, as a [`RecordProblem`](crate::RecordProblem).
     pub fn validate(&self) -> Result<(), crate::RecordProblem> {
         crate::validate::check_spectrum(self)
     }
@@ -460,7 +460,7 @@ impl ChromatogramRecord {
     ///
     /// # Errors
     ///
-    /// The first problem found, as a [`RecordProblem`].
+    /// The first problem found, as a [`RecordProblem`](crate::RecordProblem).
     pub fn validate(&self) -> Result<(), crate::RecordProblem> {
         crate::validate::check_chromatogram(self)
     }

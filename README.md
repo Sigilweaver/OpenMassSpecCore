@@ -34,7 +34,11 @@ This repository is a Cargo workspace with two crates:
 
 Documentation: [sigilweaver.app/openmassspec/docs](https://sigilweaver.app/openmassspec/docs)
 
-Reader authors upgrading from 2.x: see [MIGRATING-3.0.md](MIGRATING-3.0.md).
+Upgrading from 3.x: see
+[MIGRATING-4.0.md](https://github.com/Sigilweaver/OpenMassSpecCore/blob/main/MIGRATING-4.0.md)
+(reader authors, users of records, Python users). Reader authors upgrading
+from 2.x also need
+[MIGRATING-3.0.md](https://github.com/Sigilweaver/OpenMassSpecCore/blob/main/MIGRATING-3.0.md).
 
 ## Install
 

@@ -11,7 +11,8 @@
 //! arrays instead.
 //!
 //! Record errors: by default the writer stops at the first `Err` the source
-//! yields and returns it, leaving a truncated document in `out`. With
+//! yields and returns it; what `out` holds then depends on where the error
+//! came (see [`RecordErrorPolicy::Fail`]). With
 //! [`RecordErrorPolicy::Skip`] it leaves failed records out, counts them, and
 //! reports the counts in the returned [`WriteSummary`].
 //!
@@ -474,7 +475,24 @@ impl Write for Spool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum RecordErrorPolicy {
-    /// Stop and return the error. The document in `out` is truncated.
+    /// Stop and return the error.
+    ///
+    /// What `out` holds depends on where the write stops. The writer reads
+    /// and checks all spectra before it writes the document head, so an
+    /// error in that phase (the source yields `Err` for a spectrum, a
+    /// spectrum is rejected, the spectrum-count check fails, the spool file
+    /// cannot be created or written) leaves `out` untouched: no bytes are
+    /// written, whether `out` is a `Vec` or a `File`. An error after the head
+    /// is written leaves an incomplete document. That covers a chromatogram
+    /// the source cannot yield or the writer rejects, an I/O error from
+    /// `out`, and reading the spool back into `out` (flushing it, reading it,
+    /// the byte-count check, removing it). The writer writes the head and the
+    /// opening `<spectrumList>` tag, then copies the spool, so a spool
+    /// read-back failure leaves them in `out` with none, some or all spectra. A
+    /// chromatogram error leaves the head and the complete `<spectrumList>`.
+    /// Either way there is no `</run>` and, for indexed output, no
+    /// `<indexList>`. A caller that needs all or nothing writes to a
+    /// temporary file and renames it on success.
     #[default]
     Fail,
     /// Leave the failed record out and keep writing. Each skipped record is
@@ -686,7 +704,9 @@ impl WriteSummary {
 /// # Errors
 ///
 /// Returns the first `Err` the source yields, or an I/O error from `out` or
-/// the spool file. `out` then holds an incomplete document.
+/// the spool file. `out` is untouched if the error comes while the spectra
+/// are read and checked, and holds an incomplete document if it comes later;
+/// see [`RecordErrorPolicy::Fail`].
 pub fn write_mzml<S: SpectrumSource + ?Sized, W: Write>(
     src: &mut S,
     out: &mut W,
@@ -711,7 +731,9 @@ pub fn write_mzml<S: SpectrumSource + ?Sized, W: Write>(
 ///
 /// Returns an I/O error from `out` or the spool file, or the first `Err` the
 /// source yields unless `opts` selects [`RecordErrorPolicy::Skip`]. `out`
-/// then holds an incomplete document.
+/// is untouched if the error comes while the spectra are read and checked,
+/// and holds an incomplete document if it comes later; see
+/// [`RecordErrorPolicy::Fail`].
 pub fn write_mzml_with_options<S: SpectrumSource + ?Sized, W: Write>(
     src: &mut S,
     out: &mut W,
@@ -740,7 +762,9 @@ fn write_plain<S: SpectrumSource + ?Sized, W: Write>(
 /// # Errors
 ///
 /// Returns the first `Err` the source yields, or an I/O error from `out` or
-/// the spool file. `out` then holds an incomplete document.
+/// the spool file. `out` is untouched if the error comes while the spectra
+/// are read and checked, and holds an incomplete document if it comes later;
+/// see [`RecordErrorPolicy::Fail`].
 pub fn write_indexed_mzml<S: SpectrumSource + ?Sized, W: Write>(
     src: &mut S,
     out: &mut W,
@@ -762,7 +786,9 @@ pub fn write_indexed_mzml<S: SpectrumSource + ?Sized, W: Write>(
 ///
 /// Returns an I/O error from `out` or the spool file, or the first `Err` the
 /// source yields unless `opts` selects [`RecordErrorPolicy::Skip`]. `out`
-/// then holds an incomplete document.
+/// is untouched if the error comes while the spectra are read and checked,
+/// and holds an incomplete document if it comes later; see
+/// [`RecordErrorPolicy::Fail`].
 pub fn write_indexed_mzml_with_options<S: SpectrumSource + ?Sized, W: Write>(
     src: &mut S,
     out: &mut W,
@@ -2647,6 +2673,79 @@ mod tests {
         assert!(err.to_string().contains("chromatogram 0 is corrupt"));
     }
 
+    /// Where a failed write stops. Spectra go to a spool and the head is
+    /// written after they are read and checked, so an error in that phase
+    /// leaves `out` empty. An error in the chromatogram list comes after the
+    /// head and the spectrum list are written, so `out` holds those.
+    #[test]
+    fn failed_write_output_depends_on_where_it_fails() {
+        let pre_head = |src: &mut ToySource, case: usize| match case {
+            0 => src.failing_spectra = vec![0],
+            1 => src.spectra[0].ms_level = 0,
+            _ => src.count_hint = CountHint::Fixed(5),
+        };
+        for indexed in [false, true] {
+            let run = |src: &mut ToySource, out: &mut Vec<u8>| {
+                if indexed {
+                    write_indexed_mzml(src, out)
+                } else {
+                    write_mzml(src, out)
+                }
+            };
+            for case in 0..3 {
+                let mut src = ToySource::new();
+                pre_head(&mut src, case);
+                let mut out = Vec::new();
+                assert!(run(&mut src, &mut out).is_err());
+                assert!(out.is_empty(), "case {case}, indexed {indexed}");
+            }
+            let mut src = ToySource::new();
+            src.chroms = vec![tic_chromatogram(0)];
+            src.failing_chroms = vec![0];
+            let mut out = Vec::new();
+            assert!(run(&mut src, &mut out).is_err());
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("<spectrumList") && text.contains("</spectrumList>"));
+            assert!(!text.contains("</run>") && !text.contains("<indexList"));
+        }
+
+        // A sink that fails part way holds the bytes it accepted.
+        struct Limited(Vec<u8>);
+        impl Write for Limited {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                if self.0.len() >= 200 {
+                    return Err(io::Error::other("sink full"));
+                }
+                self.0.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut sink = Limited(Vec::new());
+        let err = write_mzml(&mut ToySource::new(), &mut sink).unwrap_err();
+        assert!(matches!(err, crate::Error::Io(_)), "{err:?}");
+        assert!(sink.0.starts_with(b"<?xml") && !sink.0.ends_with(b"</mzML>\n"));
+
+        // A `File` sink gets the same bytes as a `Vec`.
+        let path =
+            std::env::temp_dir().join(format!("omc-failed-write-{}.mzML", std::process::id()));
+        let mut src = ToySource::new();
+        src.failing_spectra = vec![0];
+        let mut file = File::create(&path).unwrap();
+        assert!(write_mzml(&mut src, &mut file).is_err());
+        assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+        let mut src = ToySource::new();
+        src.chroms = vec![tic_chromatogram(0)];
+        src.failing_chroms = vec![0];
+        let mut file = File::create(&path).unwrap();
+        assert!(write_mzml(&mut src, &mut file).is_err());
+        let text = fs::read_to_string(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(text.contains("</spectrumList>") && !text.contains("</run>"));
+    }
+
     #[test]
     fn skip_policy_counts_and_reports_skipped_records() {
         let mut src = ToySource::new();
@@ -2891,9 +2990,11 @@ mod tests {
         let dir = spool_test_dir("missing").join("does-not-exist");
         let mut src = ToySource::new();
         let opts = WriteOptions::new().with_spool_dir(&dir);
-        let err = write_plain(&mut src, &mut Vec::new(), &opts, 1).unwrap_err();
+        let mut out = Vec::new();
+        let err = write_plain(&mut src, &mut out, &opts, 1).unwrap_err();
         assert!(matches!(err, crate::Error::Io(_)), "{err:?}");
         assert!(err.to_string().contains("spool file"), "{err}");
+        assert!(out.is_empty(), "the spool fails before the head is written");
         fs::remove_dir_all(dir.parent().unwrap()).unwrap();
     }
 

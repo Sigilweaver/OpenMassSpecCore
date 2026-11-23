@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+title: "OpenMassSpecCore: Shared record types and mzML writer for open Rust mass-spectrometry readers"
+message: >
+  If you use OpenMassSpecCore in your research, please cite it using the
+  metadata below. Citation is encouraged and appreciated but not legally
+  required.
+type: software
+authors:
+  - family-names: Riley
+    given-names: Nathan
+    orcid: "https://orcid.org/0009-0004-1579-7312"
+    website: "https://github.com/Sigilweaver"
+repository-code: "https://github.com/Sigilweaver/OpenMassSpecCore"
+url: "https://sigilweaver.app"
+abstract: >
+  OpenMassSpecCore is the shared foundation of the Sigilweaver open
+  mass-spectrometry readers. It defines vendor-neutral spectrum, chromatogram
+  and run records, the SpectrumSource trait every reader implements, a
+  streaming mzML 1.1.0 writer with indexed output, typed PSI-MS controlled
+  vocabulary terms, a profile-to-centroid transform and a conformance harness.
+  A companion crate bridges the records to Apache Arrow. It is implemented in
+  pure Rust with no dependency on vendor libraries.
+license: "Apache-2.0"
+license-url: "https://github.com/Sigilweaver/OpenMassSpecCore/blob/main/LICENSE"
+date-released: "2026-11-23"
+version: "4.0.0"
+keywords:
+  - mass spectrometry
+  - proteomics
+  - mzML
+  - PSI-MS
+  - Apache Arrow
+  - bioinformatics
+  - Rust
