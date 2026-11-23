@@ -950,6 +950,12 @@ pub mod arrow_60 {
     bridge!(arrow_array_60, arrow_schema_60);
 }
 
+/// Compiles the `rust` blocks of `MIGRATING-4.0.md` as doc tests, so the
+/// "After" snippets stay true to this API.
+#[cfg(doctest)]
+#[doc = include_str!("../../../MIGRATING-4.0.md")]
+pub struct MigratingGuide;
+
 #[cfg(test)]
 mod tests {
     use super::*;
