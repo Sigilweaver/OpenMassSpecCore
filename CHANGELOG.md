@@ -22,13 +22,12 @@ for before and after code.
   names, so Core 3 JSON (`"Positive"`, `"TOFMS"`) no longer parses; each has
   `FromStr`.
 - `SpectrumRecord::retention_time_sec` is `Option<f64>`;
-  `with_retention_time_sec` still takes an `f64`.
+  `with_retention_time_sec` takes an `f64` or an `Option<f64>`.
 - `MsPower` is removed.
 - `Error::Format` and `Error::Conformance` are removed; `Error::Vendor`
   exposes its source.
 - `SpectrumIter` and `ChromatogramIter` are `Send`.
-- `WriteSummary` is not `Copy` or `Eq`, `WriteOptions` is not `Eq`, and
-  `WriteSummary::spectrum_count_mismatch` is `Option<CountMismatch>`.
+- `WriteSummary` is not `Copy` or `Eq`, and `WriteOptions` is not `Eq`.
 - `openmassspec-arrow` (own version line, 4.0.0): everything moves into a
   module named for the arrow-rs release, `openmassspec_arrow::arrow_60`
   (feature `arrow-60`, default); only version-independent items
@@ -150,7 +149,8 @@ Files that convert today can fail or read differently:
 
 ## [3.0.0] - 2026-10-11
 
-Public types are `#[non_exhaustive]`, so later field, variant, and CV-term
+This release is intended to be the last breaking release of the core API:
+public types are `#[non_exhaustive]`, so later field, variant, and CV-term
 additions are minor releases. Reader authors: see
 [MIGRATING-3.0.md](MIGRATING-3.0.md) for step-by-step instructions.
 
