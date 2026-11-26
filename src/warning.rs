@@ -38,7 +38,7 @@ pub enum WarningKind {
     EmptySpectrum,
     /// Run-level: the source declared that its format never states a value
     /// ([`RunMetadata::unstated`](crate::RunMetadata::unstated)), and at
-    /// least one record was written or passed on without it. The message
+    /// least one record was written without it. The message
     /// names the check.
     UnstatedBySource,
     /// A code defined by a reader crate or a newer Core.

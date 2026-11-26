@@ -285,6 +285,11 @@ pub struct SpectrumRecord {
     /// Lowest observed m/z. If `None`, the writer uses `mz.first()`.
     pub low_mz: Option<f64>,
     /// Highest observed m/z. If `None`, the writer uses `mz.last()`.
+    ///
+    /// On a spectrum with no peaks leave all four of `base_peak_mz`,
+    /// `base_peak_intensity`, `low_mz` and `high_mz` `None`: the mzML
+    /// writer and the Arrow builder ignore them there, and the conformance
+    /// harness rejects them.
     pub high_mz: Option<f64>,
     /// Instrument scan windows in m/z: the acquisition ranges, which are not
     /// the observed range of the peaks. Segmented and multi-window

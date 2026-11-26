@@ -522,7 +522,9 @@ pub struct WriteOptions {
     /// Handling of `Err` records. Defaults to [`RecordErrorPolicy::Fail`].
     pub record_error_policy: RecordErrorPolicy,
     /// Checks that may continue with a [`Warning`] on the record instead of
-    /// failing. Defaults to strict (empty).
+    /// failing. Defaults to strict (empty). For a source that declares what
+    /// its format never states, the writer adds those checks (see
+    /// [`RunMetadata::unstated`]).
     pub leniency: Leniency,
     /// How many [`WriteIssue`]s [`WriteSummary::issues`] keeps; further ones
     /// are only counted in [`WriteSummary::issues_truncated`]. Defaults to
@@ -3848,6 +3850,48 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn both_declarations_relied_on_give_two_run_warnings_even_under_skip() {
+        let mut no_mode = ms2_with_unitless_energy(0);
+        no_mode.scan_mode = None;
+        let opts = WriteOptions::new().with_record_error_policy(RecordErrorPolicy::Skip);
+        let (s, summary) = write_declared(
+            vec![no_mode],
+            vec![Check::UnknownScanMode, Check::UnknownCollisionEnergyUnit],
+            &opts,
+        )
+        .unwrap();
+        assert_eq!(summary.warning_counts.get("unstated_by_source"), Some(&2));
+        assert_eq!(
+            s.matches("openmassspec: warning unstated_by_source")
+                .count(),
+            2
+        );
+        assert_eq!(summary.skipped(), 0);
+    }
+
+    #[test]
+    fn run_warning_depends_on_the_declaration_not_on_the_callers_leniency() {
+        let allow = WriteOptions::new()
+            .with_leniency(Leniency::strict().with(Check::UnknownCollisionEnergyUnit));
+        // Caller allowed it, source did not declare it: record warning only.
+        let (_, summary) =
+            write_declared(vec![ms2_with_unitless_energy(0)], Vec::new(), &allow).unwrap();
+        assert_eq!(
+            summary.warning_counts.get("unknown_collision_energy_unit"),
+            Some(&1)
+        );
+        assert_eq!(summary.warning_counts.get("unstated_by_source"), None);
+        // Both: the declaration still produces the run warning.
+        let (_, summary) = write_declared(
+            vec![ms2_with_unitless_energy(0)],
+            vec![Check::UnknownCollisionEnergyUnit],
+            &allow,
+        )
+        .unwrap();
+        assert_eq!(summary.warning_counts.get("unstated_by_source"), Some(&1));
     }
 
     #[test]
