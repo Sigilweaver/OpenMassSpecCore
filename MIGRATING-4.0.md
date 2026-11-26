@@ -154,7 +154,18 @@ A reader whose 3.x release wrote `ce_is_nce: false` because it did not know
 the unit now passes `None`. The mzML writer rejects a collision energy with
 no unit (`RecordProblem::CollisionEnergyUnitUnknown`) unless the caller
 allows `Check::UnknownCollisionEnergyUnit` (see 1.6), which writes the value
-as a unit-less `userParam` and adds a warning to the record.
+as a unit-less `userParam` and adds a warning to the record. A reader whose
+format never states the unit declares that once for the whole source (see
+1.6, "A format that never states a value").
+
+An entry is one applied energy. A ramp is not an entry: do not put the
+start, end or midpoint of a ramp in `collision_energies`, and do not put one
+cell's value there when the scan uses two cells, because each states a
+value the instrument did not apply. A reader that cannot state the applied
+energy leaves the list empty and keeps the raw values in `extra`. Stepped
+energies are different and fit: one entry per step. `CollisionEnergy` has no
+ramp or cell-role field in 4.0; that is a known gap, and fields for it can
+be added in a 4.x release.
 
 ### 1.4 Retention time is optional
 
@@ -208,7 +219,8 @@ Set `scan_mode` on every spectrum from what the file declares. A spectrum
 with `scan_mode: None` is `RecordProblem::UnknownScanMode` and stops the
 write even under `RecordErrorPolicy::Skip`. Core 3 wrote it as a profile
 spectrum. A reader that cannot tell leaves `None` and lets the caller opt in
-with `Check::UnknownScanMode` (1.6).
+with `Check::UnknownScanMode` (1.6), or, when its format never states the
+mode in any file, declares that in `RunMetadata::unstated` (1.6).
 
 `Centroided` picks peaks only from spectra declared `ScanMode::Profile`, and
 runs the record checks below first. It rejects a spectrum labelled profile
@@ -277,6 +289,10 @@ each affected record gets a `Warning`:
 | `DanglingPrecursorRef`         | record error: the referenced spectrum is not among those already written | the `spectrumRef` is dropped          |
 | `UnknownCollisionEnergyUnit`   | record error                               | value written as a unit-less `userParam`        |
 | `SpectrumCountShortfall`       | `Error::SpectrumCountShortfall`            | run-level warning and `WriteSummary::spectrum_count_mismatch` |
+
+Each error message names the check that allows it (for example
+"allow the check `unknown_scan_mode` to continue without it"), so a
+command line that exposes `--allow` can show the user what to pass.
 
 Precursor references depend on stream order. The writer resolves
 `PrecursorInfo::precursor_native_id` only against spectra it has already
@@ -372,6 +388,78 @@ if leniency.allows(&mine) {
 `Check::UnknownScanMode` allowed it passes a spectrum of unknown scan mode
 through unchanged and adds a `centroid_not_applied` warning.
 
+#### A format that never states a value
+
+Two checks guard values that some formats never state in any file: the
+collision-energy unit (an Agilent Q-TOF scan record is a bare number) and
+the scan mode (a SCIEX `.wiff` stream does not say profile or centroid).
+A strict default would refuse every such file, so the reader declares the
+fact once, in `RunMetadata::unstated`:
+
+- `RunMetadata::with_unstated(check)` adds one check; `with_unstated_checks`
+  sets the whole list; the field is `unstated: Vec<Check>`.
+- Only `Check::UnknownScanMode` and `Check::UnknownCollisionEnergyUnit` are
+  honoured. Any other entry is ignored.
+- For a declared check the writer and `Centroided` behave as if the caller
+  had allowed it: the value is written as in the lenient row of the table
+  above and each affected record carries its warning
+  (`unknown_scan_mode`, `unknown_collision_energy_unit`).
+- The run also gets one `WarningKind::UnstatedBySource` warning (code
+  `unstated_by_source`) per declared check that at least one record needed.
+  It is written as a run-level `openmassspec: warning unstated_by_source`
+  userParam and counted in `WriteSummary::warning_counts`, so
+  `has_warnings` is true. A declared source whose records all state the
+  value gets no warning.
+- Declare it only when the format cannot state the value. A reader that
+  reads the value from the file, or fails to for some files, declares
+  nothing: a missing value then still fails loudly, which is how a decode
+  bug shows up. The caller cannot switch a declaration off.
+
+```rust
+use openmassspec_core::{
+    write_mzml, Check, CvTerm, PrecursorInfo, RunMetadata, ScanMode, SpectrumIter,
+    SpectrumRecord, SpectrumSource,
+};
+
+struct QToF(Vec<SpectrumRecord>);
+
+impl SpectrumSource for QToF {
+    fn run_metadata(&self) -> RunMetadata {
+        RunMetadata::new(
+            "run.d",
+            CvTerm::new("MS:1000563", "Thermo RAW format"),
+            CvTerm::new("MS:1000768", "Thermo nativeID format"),
+            CvTerm::new("MS:1000483", "Thermo Fisher Scientific instrument model"),
+            "my-reader",
+            "1.0.0",
+        )
+        // This format gives collision energies as bare numbers.
+        .with_unstated(Check::UnknownCollisionEnergyUnit)
+    }
+
+    fn iter_spectra<'a>(&'a mut self) -> SpectrumIter<'a> {
+        Box::new(self.0.clone().into_iter().map(Ok))
+    }
+}
+
+let ms2 = SpectrumRecord::new(0, 1, "scan=1")
+    .with_ms_level(2)
+    .with_scan_mode(ScanMode::Centroid)
+    .with_retention_time_sec(1.0)
+    .with_precursor(
+        PrecursorInfo::default()
+            .with_selected_mz(500.0)
+            .with_collision_energy(30.0, None),
+    )
+    .with_peaks(vec![100.0], vec![1.0]);
+
+// Default options, no `Leniency`: the file converts, with warnings.
+let summary = write_mzml(&mut QToF(vec![ms2]), &mut Vec::new()).unwrap();
+assert_eq!(summary.warning_counts["unknown_collision_energy_unit"], 1);
+assert_eq!(summary.warning_counts["unstated_by_source"], 1);
+assert!(summary.has_warnings());
+```
+
 ### 1.7 Removed `Copy` and `Eq` impls
 
 `WriteSummary` is no longer `Copy` or `Eq`, and `WriteOptions` is no longer
@@ -462,8 +550,10 @@ test can fail on data it passed before:
   spectrum; `Absent`: none); `assert_iter_invariants` has no run, so the first
   spectrum decides (`InvalidRecord` with `MissingRetentionTime` or
   `UnexpectedRetentionTime`);
-- it rejects a declared base-peak intensity on an empty spectrum, which it
-  used to accept (`BasePeakIntensityMismatch`, computed 0).
+- it rejects a declared base peak or m/z range on an empty spectrum, which
+  it used to accept as 0.0 (`ConformanceError::DeclaredOnEmptySpectrum`), and
+  an empty spectrum without a `WarningKind::EmptySpectrum` warning
+  (`ConformanceError::EmptySpectrum`); see 1.11.
 
 If you use `openmassspec-arrow`, everything moves into a module named for
 the arrow-rs release it is built against (feature `arrow-60`, on by
@@ -535,6 +625,50 @@ let beam = PrecursorInfo::default()
 assert_eq!(beam.activation, Some(Activation::HCD));
 ```
 
+### 1.11 Empty spectra
+
+A spectrum with no peaks needs two things from the reader, and the
+conformance harness checks both:
+
+- It carries `Warning::new(WarningKind::EmptySpectrum, message)` (code
+  `empty_spectrum`), so a consumer finds every empty spectrum by one code
+  whichever reader produced it. A reader-specific code such as
+  `myreader.empty_spectrum` does not count; add it as well if you want it.
+  The flag reaches the mzML as a warning userParam and the Arrow batch in
+  the `warnings` column, and it makes `WriteSummary::has_warnings` true.
+  Do not treat that as a failure: an empty scan is a fact about the run.
+- It declares no base peak and no m/z range: `base_peak_mz`,
+  `base_peak_intensity`, `low_mz` and `high_mz` stay `None`. A declared
+  `0.0` is rejected by the harness
+  (`ConformanceError::DeclaredOnEmptySpectrum`). `effective_base_peak` and
+  `effective_mz_range` return `None` for an empty spectrum even when those
+  fields are set, so the writer never prints them. `total_ion_current` may
+  be declared as `0.0`.
+
+The writer does not require the flag; the harness does, so a reader that
+forgets it fails in its own CI.
+
+```rust
+use openmassspec_core::conformance::assert_iter_invariants;
+use openmassspec_core::{SpectrumRecord, Warning, WarningKind};
+
+let empty = SpectrumRecord::new(0, 1, "scan=1")
+    .with_retention_time_sec(1.0)
+    .with_warning(Warning::new(WarningKind::EmptySpectrum, "the scan has no peaks"));
+assert_eq!(empty.effective_base_peak(), None);
+assert_eq!(empty.effective_mz_range(), None);
+assert_eq!(assert_iter_invariants(vec![empty.clone()]).unwrap(), 1);
+
+// Without the flag the harness refuses it.
+let mut unflagged = empty.clone();
+unflagged.warnings.clear();
+assert!(assert_iter_invariants(vec![unflagged]).is_err());
+
+// So does a declared base peak, even 0.0.
+let declared = empty.with_base_peak_intensity(0.0);
+assert!(assert_iter_invariants(vec![declared]).is_err());
+```
+
 ## 2. Users of records
 
 You use the records a reader returns, or the writer, from Rust.
@@ -602,7 +736,8 @@ assert!("TOFMS".parse::<Analyzer>().is_err());
 
 ### 2.3 Conversions are stricter
 
-Records that Core 3 wrote with a silent default are errors now: an
+Records that Core 3 wrote with a silent default are errors now (unless the
+source declares that its format never states the value, 1.6): an
 unknown scan mode, a collision energy with no unit, a missing retention
 time, ms level 0, unsorted or non-finite m/z, mismatched arrays, a repeated
 native id, or a chromatogram with mismatched arrays, non-finite values or a
@@ -652,8 +787,8 @@ and 4.x:
   term.
 - `<scanWindowList>` is written only from `scan_windows`. It used to carry
   the observed m/z range. Empty spectra omit the base-peak and observed-range
-  terms instead of writing 0, and a spectrum with no retention time has no
-  scan start time.
+  terms instead of writing 0, even when the record declares them, and a
+  spectrum with no retention time has no scan start time.
 - A spectrum whose analyzer is not in `RunMetadata::analyzers` gets its own
   `instrumentConfiguration` (it used to inherit `IC1`). `<fileContent>`
   declares only the spectrum kinds written.
@@ -716,9 +851,11 @@ document them.
 | no `scan_windows`                                       | `rec["scan_windows"]`, a list of `{"lower", "upper"}`                  |
 | no `warnings`                                           | `rec["warnings"]`, a list of `{"kind", "message"}`                     |
 | run metadata without `time_axis`                        | `"retention_time"` or `"absent"`                                       |
+| no `unstated` in run metadata                           | `unstated`, a list of check names (`"unknown_scan_mode"`, `"unknown_collision_energy_unit"`); left out when empty |
 
 `collision_energies`, `scan_windows` and `warnings` are left out of the dict
-when empty, so read them with `.get(key, [])`. An MS1 spectrum has
+when empty, so read them with `.get(key, [])`. An empty spectrum has a
+warning with kind `"empty_spectrum"` and no base peak or m/z range. An MS1 spectrum has
 `precursor` set to `None`.
 
 Before:

@@ -32,6 +32,15 @@ pub enum WarningKind {
     UnknownCollisionEnergyUnit,
     /// The source announced more spectra than were written or skipped.
     SpectrumCountShortfall,
+    /// The spectrum has no peaks. Every reader sets it on an empty
+    /// spectrum, so a consumer finds them by one code; the conformance
+    /// harness requires it.
+    EmptySpectrum,
+    /// Run-level: the source declared that its format never states a value
+    /// ([`RunMetadata::unstated`](crate::RunMetadata::unstated)), and at
+    /// least one record was written or passed on without it. The message
+    /// names the check.
+    UnstatedBySource,
     /// A code defined by a reader crate or a newer Core.
     Other(Cow<'static, str>),
 }
@@ -45,6 +54,8 @@ impl WarningKind {
             Self::CentroidNotApplied => "centroid_not_applied",
             Self::UnknownCollisionEnergyUnit => "unknown_collision_energy_unit",
             Self::SpectrumCountShortfall => "spectrum_count_shortfall",
+            Self::EmptySpectrum => "empty_spectrum",
+            Self::UnstatedBySource => "unstated_by_source",
             Self::Other(code) => code,
         }
     }
@@ -59,6 +70,8 @@ impl WarningKind {
             "centroid_not_applied" => Self::CentroidNotApplied,
             "unknown_collision_energy_unit" => Self::UnknownCollisionEnergyUnit,
             "spectrum_count_shortfall" => Self::SpectrumCountShortfall,
+            "empty_spectrum" => Self::EmptySpectrum,
+            "unstated_by_source" => Self::UnstatedBySource,
             other => Self::Other(Cow::Owned(other.to_string())),
         }
     }
@@ -130,6 +143,23 @@ mod tests {
             WarningKind::from_code("unknown_scan_mode"),
             WarningKind::UnknownScanMode
         );
+    }
+
+    #[test]
+    fn built_in_codes_round_trip() {
+        for kind in [
+            WarningKind::UnknownScanMode,
+            WarningKind::DanglingPrecursorRef,
+            WarningKind::CentroidNotApplied,
+            WarningKind::UnknownCollisionEnergyUnit,
+            WarningKind::SpectrumCountShortfall,
+            WarningKind::EmptySpectrum,
+            WarningKind::UnstatedBySource,
+        ] {
+            assert_eq!(WarningKind::from_code(kind.code()), kind);
+        }
+        assert_eq!(WarningKind::EmptySpectrum.code(), "empty_spectrum");
+        assert_eq!(WarningKind::UnstatedBySource.code(), "unstated_by_source");
     }
 
     #[test]

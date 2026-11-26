@@ -10,7 +10,11 @@
 //!
 //! 1. `mz.len() == intensity.len()`. Empty spectra are allowed because
 //!    sparse PASEF / SRM frames can legitimately yield zero peaks within
-//!    a scan range.
+//!    a scan range, but an empty spectrum must carry a
+//!    [`WarningKind::EmptySpectrum`] warning
+//!    ([`ConformanceError::EmptySpectrum`]) and declare no base peak and no
+//!    m/z range ([`ConformanceError::DeclaredOnEmptySpectrum`]): it has no
+//!    peak to be the base peak and no observed range.
 //! 2. `inv_mobility_per_peak`, when present, has the same length as `mz`.
 //! 3. `total_ion_current`, when provided by the parser, equals
 //!    `sum(intensity)` within a relative tolerance.
@@ -32,6 +36,7 @@ use std::collections::HashMap;
 
 use crate::source::SpectrumSource;
 use crate::types::SpectrumRecord;
+use crate::warning::WarningKind;
 
 /// Relative tolerance applied to TIC / base-peak floating-point checks.
 const FLOAT_REL_TOL: f64 = 1e-4;
@@ -99,9 +104,18 @@ pub enum ConformanceError {
         previous: Option<usize>,
         current: usize,
     },
-    /// Spectrum had no peaks at all.
+    /// The spectrum has no peaks and does not carry
+    /// [`WarningKind::EmptySpectrum`].
     #[non_exhaustive]
     EmptySpectrum { native_id: String },
+    /// The spectrum has no peaks but declares a base peak or an m/z range.
+    /// `field` is the declared field (`base_peak_mz`, `base_peak_intensity`,
+    /// `low_mz` or `high_mz`).
+    #[non_exhaustive]
+    DeclaredOnEmptySpectrum {
+        native_id: String,
+        field: &'static str,
+    },
     /// The record fails [`SpectrumRecord::validate`] (non-finite values,
     /// unsorted m/z, invalid scan windows, ...).
     #[non_exhaustive]
@@ -175,7 +189,14 @@ impl std::fmt::Display for ConformanceError {
                 f,
                 "{native_id}: index sequence broken (prev={previous:?}, current={current})"
             ),
-            Self::EmptySpectrum { native_id } => write!(f, "{native_id}: empty spectrum"),
+            Self::EmptySpectrum { native_id } => write!(
+                f,
+                "{native_id}: no peaks and no `empty_spectrum` warning on the record"
+            ),
+            Self::DeclaredOnEmptySpectrum { native_id, field } => write!(
+                f,
+                "{native_id}: no peaks but {field} is declared; an empty spectrum has no base peak or m/z range"
+            ),
             Self::InvalidRecord { native_id, problem } => write!(f, "{native_id}: {problem}"),
             Self::DuplicateNativeId { native_id } => {
                 write!(f, "{native_id}: native id used by more than one spectrum")
@@ -302,6 +323,30 @@ fn check_one(
             native_id: s.native_id.clone(),
             problem,
         })?;
+    if s.mz.is_empty() {
+        for (field, declared) in [
+            ("base_peak_mz", s.base_peak_mz),
+            ("base_peak_intensity", s.base_peak_intensity),
+            ("low_mz", s.low_mz),
+            ("high_mz", s.high_mz),
+        ] {
+            if declared.is_some() {
+                return Err(ConformanceError::DeclaredOnEmptySpectrum {
+                    native_id: s.native_id.clone(),
+                    field,
+                });
+            }
+        }
+        if !s
+            .warnings
+            .iter()
+            .any(|w| w.kind == WarningKind::EmptySpectrum)
+        {
+            return Err(ConformanceError::EmptySpectrum {
+                native_id: s.native_id.clone(),
+            });
+        }
+    }
     if let Some(tic) = s.total_ion_current {
         let computed: f64 = s.intensity.iter().map(|&v| v as f64).sum();
         if !rel_close(tic, computed, FLOAT_REL_TOL) {
@@ -313,16 +358,13 @@ fn check_one(
         }
     }
     if let Some(bp) = s.base_peak_intensity {
-        // An empty spectrum has a base peak of 0; a declared peak there
-        // contradicts the arrays.
-        let computed = if s.intensity.is_empty() {
-            0.0
-        } else {
-            s.intensity
-                .iter()
-                .copied()
-                .fold(f32::NEG_INFINITY, f32::max) as f64
-        };
+        // An empty spectrum declares none (checked above), so the arrays
+        // are not empty here.
+        let computed = s
+            .intensity
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max) as f64;
         if !rel_close(bp, computed, FLOAT_REL_TOL) {
             return Err(ConformanceError::BasePeakIntensityMismatch {
                 native_id: s.native_id.clone(),
@@ -547,16 +589,77 @@ mod tests {
             "{err:?}"
         );
 
-        let mut empty = ok_spec(0, 1, 1.0);
-        empty.mz.clear();
-        empty.intensity.clear();
-        empty.total_ion_current = None;
-        empty.base_peak_intensity = Some(50.0);
-        let err = assert_source_invariants(&mut ToySource(vec![empty], None)).unwrap_err();
+        let mut a = ok_spec(0, 1, 1.0);
+        a.base_peak_intensity = Some(50.0);
+        let err = assert_source_invariants(&mut ToySource(vec![a], None)).unwrap_err();
         assert!(
             matches!(err, ConformanceError::BasePeakIntensityMismatch { .. }),
             "{err:?}"
         );
+    }
+
+    /// An empty MS1 spectrum with nothing declared and the flag set.
+    fn empty_spec(index: usize) -> SpectrumRecord {
+        let mut s = ok_spec(index, 1, 1.0 + index as f64);
+        s.mz.clear();
+        s.intensity.clear();
+        s.total_ion_current = None;
+        s.base_peak_mz = None;
+        s.base_peak_intensity = None;
+        s.low_mz = None;
+        s.high_mz = None;
+        s.warnings
+            .push(crate::Warning::new(WarningKind::EmptySpectrum, "no peaks"));
+        s
+    }
+
+    #[test]
+    fn a_flagged_empty_spectrum_with_nothing_declared_passes() {
+        let mut src = ToySource(vec![ok_spec(0, 1, 0.5), empty_spec(1)], None);
+        assert_eq!(assert_source_invariants(&mut src).unwrap(), 2);
+    }
+
+    #[test]
+    fn an_empty_spectrum_without_the_flag_fails() {
+        let mut s = empty_spec(0);
+        s.warnings.clear();
+        let err = assert_source_invariants(&mut ToySource(vec![s.clone()], None)).unwrap_err();
+        assert!(
+            matches!(err, ConformanceError::EmptySpectrum { .. }),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("empty_spectrum"));
+        // A reader-specific warning is not the Core flag.
+        s.warnings
+            .push(crate::Warning::other("myreader.empty_spectrum", "no peaks"));
+        assert!(matches!(
+            assert_iter_invariants(vec![s]).unwrap_err(),
+            ConformanceError::EmptySpectrum { .. }
+        ));
+    }
+
+    #[test]
+    fn an_empty_spectrum_declaring_a_base_peak_or_range_fails() {
+        type Set = fn(&mut SpectrumRecord);
+        let cases: [(&str, Set); 4] = [
+            ("base_peak_mz", |s| s.base_peak_mz = Some(0.0)),
+            ("base_peak_intensity", |s| s.base_peak_intensity = Some(0.0)),
+            ("low_mz", |s| s.low_mz = Some(0.0)),
+            ("high_mz", |s| s.high_mz = Some(0.0)),
+        ];
+        for (field, set) in cases {
+            let mut s = empty_spec(0);
+            set(&mut s);
+            let err = assert_source_invariants(&mut ToySource(vec![s], None)).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConformanceError::DeclaredOnEmptySpectrum { field: f, .. } if f == field
+                ),
+                "{field}: {err:?}"
+            );
+            assert!(err.to_string().contains(field));
+        }
     }
 
     #[test]

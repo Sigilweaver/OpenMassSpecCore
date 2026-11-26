@@ -23,7 +23,10 @@ pub enum Check {
     /// A spectrum whose scan mode is unknown: written with no
     /// profile/centroid term, and left unchanged by centroiding. The
     /// resulting mzML lacks the spectrum-representation term mzML expects,
-    /// so it can fail semantic validation by design.
+    /// so it can fail semantic validation by design. A source whose format
+    /// never states the mode declares it in
+    /// [`RunMetadata::unstated`](crate::RunMetadata::unstated), which
+    /// allows this check for that source.
     UnknownScanMode,
     /// A precursor that names a spectrum not in the output: the
     /// `spectrumRef` is dropped. References are resolved against spectra
@@ -31,7 +34,10 @@ pub enum Check {
     /// dangling.
     DanglingPrecursorRef,
     /// A precursor with a collision energy and no unit: the value is
-    /// written as a unit-less userParam instead of a cvParam.
+    /// written as a unit-less userParam instead of a cvParam. A source
+    /// whose format never states the unit declares it in
+    /// [`RunMetadata::unstated`](crate::RunMetadata::unstated), which
+    /// allows this check for that source.
     UnknownCollisionEnergyUnit,
     /// The source announced more spectra than it yielded and did not report
     /// an error: the write succeeds with a warning on the run instead of
@@ -81,6 +87,21 @@ impl fmt::Display for Check {
     }
 }
 
+impl serde::Serialize for Check {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Check {
+    /// A built-in name gives the built-in variant; any other name gives
+    /// [`Check::Other`], so reading a newer producer's output never fails.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let code = String::deserialize(d)?;
+        Ok(Check::other(code))
+    }
+}
+
 /// A check name that matches no built-in [`Check`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("unknown check {name:?}; known checks: {known}")]
@@ -112,6 +133,16 @@ impl FromStr for Check {
                     .join(", "),
             })
     }
+}
+
+/// The checks a source may declare it never states (see
+/// [`RunMetadata::unstated`](crate::RunMetadata::unstated)).
+const DECLARABLE: &[Check] = &[Check::UnknownScanMode, Check::UnknownCollisionEnergyUnit];
+
+/// `true` if `meta` declares that its format never states what `check`
+/// guards, and Core honours the declaration.
+pub(crate) fn is_declared(meta: &crate::RunMetadata, check: &Check) -> bool {
+    DECLARABLE.contains(check) && meta.unstated.contains(check)
 }
 
 /// The set of [`Check`]s that may be relaxed. Empty (the default) is strict.
@@ -161,6 +192,20 @@ impl Leniency {
         self.allowed.is_empty()
     }
 
+    /// This leniency plus the checks `meta` declares its format never
+    /// states. Declarations of checks other than
+    /// [`Check::UnknownScanMode`] and [`Check::UnknownCollisionEnergyUnit`]
+    /// are ignored.
+    pub(crate) fn with_declared(&self, meta: &crate::RunMetadata) -> Self {
+        let mut out = self.clone();
+        for check in &meta.unstated {
+            if DECLARABLE.contains(check) {
+                out.allowed.insert(check.clone());
+            }
+        }
+        out
+    }
+
     /// The relaxed checks, in a stable order.
     pub fn iter(&self) -> impl Iterator<Item = &Check> + '_ {
         self.allowed.iter()
@@ -186,6 +231,35 @@ mod tests {
         }
         let e = "nope".parse::<Check>().unwrap_err();
         assert!(e.to_string().contains("unknown_scan_mode"));
+    }
+
+    #[test]
+    fn checks_serialize_as_their_names() {
+        let json = serde_json::to_string(&[Check::UnknownScanMode, Check::other("a.b")]).unwrap();
+        assert_eq!(json, r#"["unknown_scan_mode","a.b"]"#);
+        let back: Vec<Check> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, vec![Check::UnknownScanMode, Check::other("a.b")]);
+    }
+
+    #[test]
+    fn declarations_widen_leniency_for_the_two_declarable_checks_only() {
+        use crate::{CvTerm, RunMetadata};
+        let meta = RunMetadata::new(
+            "f",
+            CvTerm::new("MS:1000563", "Thermo RAW format"),
+            CvTerm::new("MS:1000768", "Thermo nativeID format"),
+            CvTerm::new("MS:1000483", "Thermo Fisher Scientific instrument model"),
+            "t",
+            "0",
+        )
+        .with_unstated(Check::UnknownCollisionEnergyUnit)
+        .with_unstated(Check::DanglingPrecursorRef);
+        let widened = Leniency::strict().with_declared(&meta);
+        assert!(widened.allows(&Check::UnknownCollisionEnergyUnit));
+        assert!(!widened.allows(&Check::DanglingPrecursorRef));
+        assert!(!widened.allows(&Check::UnknownScanMode));
+        assert!(is_declared(&meta, &Check::UnknownCollisionEnergyUnit));
+        assert!(!is_declared(&meta, &Check::DanglingPrecursorRef));
     }
 
     #[test]

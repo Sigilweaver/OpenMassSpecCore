@@ -37,7 +37,7 @@ use crate::enums::{
     Activation, Analyzer, CollisionEnergyUnit, Compression, MobilityArrayKind, Polarity, ScanMode,
 };
 use crate::error::{Error, RecordProblem, Result};
-use crate::leniency::{Check, Leniency};
+use crate::leniency::{is_declared, Check, Leniency};
 use crate::source::SpectrumSource;
 use crate::types::{ChromatogramRecord, CvTerm, RunMetadata, SpectrumRecord};
 use crate::validate;
@@ -874,6 +874,11 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
     let extra_processing = src.additional_processing_steps();
     let compression = opts.compression;
     let skip = opts.record_error_policy == RecordErrorPolicy::Skip;
+    // What the caller allows, plus what the source says its format never
+    // states.
+    let leniency = opts.leniency.with_declared(&meta);
+    let mut relied_on_scan_mode = false;
+    let mut relied_on_ce_unit = false;
 
     // The prologue is written after the spectra have been read (it lists
     // one instrument configuration per analyzer, including any analyzer a
@@ -910,13 +915,8 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
         };
         // Check the whole record before writing any of it, so a rejected
         // record leaves no partial element in the spool.
-        let checked = check_spectrum_for_write(
-            &rec,
-            &written_ids,
-            mobility_kind,
-            meta.time_axis,
-            &opts.leniency,
-        );
+        let checked =
+            check_spectrum_for_write(&rec, &written_ids, mobility_kind, meta.time_axis, &leniency);
         let flags = match checked {
             Ok(flags) => flags,
             Err(problem) if skip && problem != RecordProblem::UnknownScanMode => {
@@ -952,6 +952,8 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
         } else {
             levels.msn = true;
         }
+        relied_on_scan_mode |= flags.omit_representation;
+        relied_on_ce_unit |= flags.unitless_collision_energy;
         summary.count_warnings(&rec.warnings);
         summary.count_warnings(&flags.warnings);
         // Offsets point at the element's `<`, so write the indent first.
@@ -970,6 +972,31 @@ fn write_body<S: SpectrumSource + ?Sized, W: Write>(
         )?;
         written_ids.insert(rec.native_id.clone());
         summary.spectra_written += 1;
+    }
+    // One run-level warning per declared check that a record needed.
+    for (relied, check, what) in [
+        (
+            relied_on_scan_mode,
+            Check::UnknownScanMode,
+            "its scan mode (profile or centroid)",
+        ),
+        (
+            relied_on_ce_unit,
+            Check::UnknownCollisionEnergyUnit,
+            "the unit of its collision energies",
+        ),
+    ] {
+        if relied && is_declared(&meta, &check) {
+            let warning = Warning::new(
+                WarningKind::UnstatedBySource,
+                format!(
+                    "the source format never states {what}; records without it were written \
+                     with a warning ({check})"
+                ),
+            );
+            summary.count_warnings(std::slice::from_ref(&warning));
+            meta.warnings.push(warning);
+        }
     }
     if let Some(hint) = src.spectrum_count_hint() {
         let accounted = summary.spectra_written + summary.spectra_skipped;
@@ -1988,6 +2015,7 @@ mod tests {
         failing_chroms: Vec<usize>,
         count_hint: CountHint,
         time_axis: crate::TimeAxis,
+        unstated: Vec<Check>,
     }
 
     /// What [`ToySource`] returns from `spectrum_count_hint`.
@@ -2020,6 +2048,7 @@ mod tests {
                 failing_chroms: Vec::new(),
                 count_hint: CountHint::Len,
                 time_axis: crate::TimeAxis::Retention,
+                unstated: Vec::new(),
             }
         }
     }
@@ -2040,6 +2069,7 @@ mod tests {
                 mobility_array_kind: None,
                 time_axis: self.time_axis,
                 analyzers: self.analyzers.clone(),
+                unstated: self.unstated.clone(),
                 warnings: Vec::new(),
                 extra: self.extra.clone(),
             }
@@ -3731,6 +3761,148 @@ mod tests {
             summary.warning_counts.get("unknown_collision_energy_unit"),
             Some(&1)
         );
+    }
+
+    /// Write `spectra` from a source that declares `unstated`.
+    fn write_declared(
+        spectra: Vec<SpectrumRecord>,
+        unstated: Vec<Check>,
+        opts: &WriteOptions,
+    ) -> Result<(String, WriteSummary)> {
+        let mut src = ToySource::new();
+        src.spectra = spectra;
+        src.unstated = unstated;
+        let mut buf = Vec::new();
+        let summary = write_mzml_with_options(&mut src, &mut buf, opts)?;
+        Ok((String::from_utf8(buf).unwrap(), summary))
+    }
+
+    fn ms2_with_unitless_energy(index: usize) -> SpectrumRecord {
+        let mut rec = minimal_spectrum(index, None);
+        rec.ms_level = 2;
+        rec.precursor = Some(
+            crate::PrecursorInfo::default()
+                .with_selected_mz(500.0)
+                .with_collision_energy(30.0, None),
+        );
+        rec
+    }
+
+    #[test]
+    fn declared_unknown_collision_energy_unit_converts_with_record_and_run_warnings() {
+        let spectra = vec![ms2_with_unitless_energy(0), ms2_with_unitless_energy(1)];
+        // Undeclared stays strict.
+        let err = write_declared(spectra.clone(), Vec::new(), &WriteOptions::new()).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown_collision_energy_unit"),
+            "the error names the check: {err}"
+        );
+        // Declared: the same records convert under default options.
+        let (s, summary) = write_declared(
+            spectra,
+            vec![Check::UnknownCollisionEnergyUnit],
+            &WriteOptions::new(),
+        )
+        .unwrap();
+        assert!(!s.contains("MS:1000045") && !s.contains("MS:1000138"));
+        assert_eq!(
+            summary.warning_counts.get("unknown_collision_energy_unit"),
+            Some(&2)
+        );
+        assert_eq!(summary.warning_counts.get("unstated_by_source"), Some(&1));
+        assert!(summary.has_warnings());
+        assert_eq!(summary.spectra_written, 2);
+        assert_eq!(
+            s.matches("openmassspec: warning unstated_by_source")
+                .count(),
+            1
+        );
+        assert!(s.contains("the unit of its collision energies"));
+        // The run-level warning is in the run header, before the spectra.
+        assert!(
+            s.find("openmassspec: warning unstated_by_source").unwrap()
+                < s.find("<spectrumList").unwrap()
+        );
+    }
+
+    #[test]
+    fn declared_unknown_scan_mode_converts_even_under_skip_and_warns_per_run() {
+        let mut rec = two_peaks();
+        rec.scan_mode = None;
+        let opts = WriteOptions::new().with_record_error_policy(RecordErrorPolicy::Skip);
+        let (s, summary) =
+            write_declared(vec![rec.clone()], vec![Check::UnknownScanMode], &opts).unwrap();
+        assert!(!s.contains("MS:1000128") && !s.contains("MS:1000127"));
+        assert_eq!(summary.warning_counts.get("unknown_scan_mode"), Some(&1));
+        assert_eq!(summary.warning_counts.get("unstated_by_source"), Some(&1));
+        assert_eq!(summary.skipped(), 0);
+        // Declaring the scan mode does not waive the unit.
+        let mut ce = ms2_with_unitless_energy(0);
+        ce.scan_mode = None;
+        let err = write_declared(vec![ce], vec![Check::UnknownScanMode], &WriteOptions::new())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Record {
+                problem: RecordProblem::CollisionEnergyUnitUnknown,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_declaration_nothing_needed_adds_no_warning() {
+        // The declared source yields records that state everything.
+        let (s, summary) = write_declared(
+            vec![two_peaks()],
+            vec![Check::UnknownScanMode, Check::UnknownCollisionEnergyUnit],
+            &WriteOptions::new(),
+        )
+        .unwrap();
+        assert!(!s.contains("unstated_by_source"));
+        assert!(!summary.has_warnings());
+    }
+
+    #[test]
+    fn only_scan_mode_and_collision_energy_unit_declarations_are_honoured() {
+        let ms1 = two_peaks();
+        let mut ms2 = minimal_spectrum(1, None);
+        ms2.ms_level = 2;
+        ms2.precursor = Some(
+            crate::PrecursorInfo::default().with_precursor_native_id("scan=missing".to_string()),
+        );
+        let err = write_declared(
+            vec![ms1, ms2],
+            vec![
+                Check::DanglingPrecursorRef,
+                Check::SpectrumCountShortfall,
+                Check::other("myreader.thing"),
+            ],
+            &WriteOptions::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Record {
+                problem: RecordProblem::DanglingPrecursorRef { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn empty_spectrum_with_declared_values_writes_no_base_peak_or_range_terms() {
+        let mut rec = minimal_spectrum(0, None);
+        rec.mz.clear();
+        rec.intensity.clear();
+        rec.base_peak_mz = Some(0.0);
+        rec.base_peak_intensity = Some(0.0);
+        rec.low_mz = Some(0.0);
+        rec.high_mz = Some(0.0);
+        let (s, _) = write_one(rec, &WriteOptions::new()).unwrap();
+        for term in ["MS:1000504", "MS:1000505", "MS:1000528", "MS:1000527"] {
+            assert!(!s.contains(term), "{term}");
+        }
     }
 
     #[test]
