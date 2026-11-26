@@ -163,6 +163,19 @@ fn centroid_record(
     rec.base_peak_intensity = None;
     rec.low_mz = None;
     rec.high_mz = None;
+    // The noise floor can remove every peak; an empty spectrum carries the
+    // flag wherever it comes from.
+    if rec.mz.is_empty()
+        && !rec
+            .warnings
+            .iter()
+            .any(|w| w.kind == WarningKind::EmptySpectrum)
+    {
+        rec.warnings.push(Warning::new(
+            WarningKind::EmptySpectrum,
+            "no peaks remain after centroiding",
+        ));
+    }
     Ok(rec)
 }
 
@@ -490,6 +503,22 @@ mod tests {
         assert_eq!(out.scan_mode, None);
         assert_eq!(out.warnings.len(), 1);
         assert_eq!(out.warnings[0].kind, WarningKind::CentroidNotApplied);
+    }
+
+    #[test]
+    fn centroiding_that_removes_every_peak_flags_the_empty_spectrum() {
+        let mut src = Centroided::new(OneSpectrumSource::new(profile_spectrum()))
+            .with_min_intensity(f32::MAX);
+        let out = src.iter_spectra().next().unwrap().unwrap();
+        assert!(out.mz.is_empty());
+        let flags = out
+            .warnings
+            .iter()
+            .filter(|w| w.kind == WarningKind::EmptySpectrum)
+            .count();
+        assert_eq!(flags, 1);
+        // The harness accepts it.
+        assert!(crate::conformance::assert_iter_invariants(vec![out]).is_ok());
     }
 
     #[test]

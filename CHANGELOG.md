@@ -117,13 +117,8 @@ Files that convert today can fail or read differently:
   spectrum (`DeclaredOnEmptySpectrum`), and an empty spectrum that does not
   carry `WarningKind::EmptySpectrum` (`EmptySpectrum`, which no Core 3
   release returned).
-- A source whose format never states the scan mode or the collision-energy
-  unit declares it in `RunMetadata::unstated`; the writer and `Centroided`
-  then accept the missing value for that source, with the usual warning on
-  each record and one run-level warning. Undeclared sources stay strict.
-- The error messages for `UnknownScanMode`, `CollisionEnergyUnitUnknown`,
-  `DanglingPrecursorRef` and `SpectrumCountShortfall` name the check that
-  allows them.
+- The Arrow builder writes no base-peak or m/z-range value for an empty
+  spectrum, whatever the record declares.
 
 ### Added
 
@@ -156,8 +151,9 @@ Files that convert today can fail or read differently:
   `CollisionEnergyUnit`, `ParseLabelError`, `TimeAxis` and
   `RunMetadata::time_axis`. `Check::other` maps a built-in code to the
   built-in variant; `Leniency::all()` covers built-in checks only.
-- `WarningKind::EmptySpectrum` (code `empty_spectrum`): every reader sets it
-  on a spectrum with no peaks, and the conformance harness requires it.
+- `WarningKind::EmptySpectrum` (code `empty_spectrum`): a reader sets it on
+  a spectrum with no peaks, and the conformance harness requires it.
+  `Centroided` sets it when its noise floor removes every peak.
 - `RunMetadata::unstated: Vec<Check>`, `RunMetadata::with_unstated(check)`
   and `with_unstated_checks(checks)`: a source declares that its format
   never states a value. Only `Check::UnknownScanMode` and
@@ -165,7 +161,13 @@ Files that convert today can fail or read differently:
   `WarningKind::UnstatedBySource` warning (code `unstated_by_source`) when a
   record needed the declaration. `Check` implements `Serialize` and
   `Deserialize` as its name.
-- `ConformanceError::DeclaredOnEmptySpectrum { native_id, field }`.
+- The error messages for `UnknownScanMode`, `CollisionEnergyUnitUnknown`,
+  `DanglingPrecursorRef` and `SpectrumCountShortfall` name the check that
+  allows them.
+- `ConformanceError::DeclaredOnEmptySpectrum { native_id, field }` and
+  `ConformanceError::UnhonouredDeclaration { check }` (a `RunMetadata::unstated`
+  entry other than the two honoured ones, found by
+  `assert_source_invariants`).
 - Documented rule: a collision-energy ramp is not an entry in
   `PrecursorInfo::collision_energies`. Core has no ramp or cell-role field in
   4.0.

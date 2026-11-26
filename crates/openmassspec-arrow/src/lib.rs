@@ -491,11 +491,16 @@ macro_rules! bridge {
                 self.retention_time_sec
                     .append_option(rec.retention_time_sec);
                 self.total_ion_current.append_option(rec.total_ion_current);
-                self.base_peak_mz.append_option(rec.base_peak_mz);
+                // An empty spectrum has no base peak and no observed range,
+                // whatever the record declares (as in the mzML writer).
+                let has_peaks = !rec.mz.is_empty();
+                self.base_peak_mz
+                    .append_option(rec.base_peak_mz.filter(|_| has_peaks));
                 self.base_peak_intensity
-                    .append_option(rec.base_peak_intensity);
-                self.low_mz.append_option(rec.low_mz);
-                self.high_mz.append_option(rec.high_mz);
+                    .append_option(rec.base_peak_intensity.filter(|_| has_peaks));
+                self.low_mz.append_option(rec.low_mz.filter(|_| has_peaks));
+                self.high_mz
+                    .append_option(rec.high_mz.filter(|_| has_peaks));
                 self.ion_injection_time_ms
                     .append_option(rec.ion_injection_time_ms);
                 self.inv_mobility.append_option(rec.inv_mobility);
@@ -877,6 +882,26 @@ macro_rules! bridge {
                     Err(BatchError::SchemaVersion { .. })
                 ));
                 assert!(check_schema_version(&Schema::new(Vec::<Field>::new())).is_err());
+            }
+
+            #[test]
+            fn an_empty_spectrum_has_no_base_peak_or_range_columns() {
+                use $aa::{Array, Float64Array};
+                let mut empty = rec(0, 1, 2, false)
+                    .with_base_peak_mz(0.0)
+                    .with_base_peak_intensity(0.0)
+                    .with_low_mz(0.0)
+                    .with_high_mz(0.0);
+                empty.mz.clear();
+                empty.intensity.clear();
+                let mut b = SpectrumBatchBuilder::new(None);
+                b.push(&empty).unwrap();
+                let batch = b.finish().unwrap();
+                for name in ["base_peak_mz", "base_peak_intensity", "low_mz", "high_mz"] {
+                    let col = batch.column_by_name(name).unwrap();
+                    let col = col.as_any().downcast_ref::<Float64Array>().unwrap();
+                    assert!(col.is_null(0), "{name}");
+                }
             }
 
             #[test]

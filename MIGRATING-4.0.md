@@ -26,7 +26,7 @@ Three changes decide most of the work:
   to its bounds. That is a public signature change in the reader, so the
   reader needs a major release too.
 - The mzML writer and `Centroided` check each record, and some output
-  changes with no compile error. Section 1.5, 1.6 and 1.10 list them for
+  changes with no compile error. Section 1.5, 1.6, 1.10 and 1.11 list them for
   reader authors and 2.3 for everyone who compares output.
 
 ## 1. Reader authors
@@ -399,7 +399,10 @@ fact once, in `RunMetadata::unstated`:
 - `RunMetadata::with_unstated(check)` adds one check; `with_unstated_checks`
   sets the whole list; the field is `unstated: Vec<Check>`.
 - Only `Check::UnknownScanMode` and `Check::UnknownCollisionEnergyUnit` are
-  honoured. Any other entry is ignored.
+  honoured. Any other entry is ignored by the writer, and
+  `conformance::assert_source_invariants` fails on it
+  (`ConformanceError::UnhonouredDeclaration`), so a wrong declaration shows
+  up in the reader's own tests.
 - For a declared check the writer and `Centroided` behave as if the caller
   had allowed it: the value is written as in the lenient row of the table
   above and each affected record carries its warning
@@ -427,9 +430,9 @@ impl SpectrumSource for QToF {
     fn run_metadata(&self) -> RunMetadata {
         RunMetadata::new(
             "run.d",
-            CvTerm::new("MS:1000563", "Thermo RAW format"),
-            CvTerm::new("MS:1000768", "Thermo nativeID format"),
-            CvTerm::new("MS:1000483", "Thermo Fisher Scientific instrument model"),
+            CvTerm::new("MS:1001509", "Agilent MassHunter format"),
+            CvTerm::new("MS:1001508", "Agilent MassHunter nativeID format"),
+            CvTerm::new("MS:1000490", "Agilent instrument model"),
             "my-reader",
             "1.0.0",
         )
@@ -553,7 +556,10 @@ test can fail on data it passed before:
 - it rejects a declared base peak or m/z range on an empty spectrum, which
   it used to accept as 0.0 (`ConformanceError::DeclaredOnEmptySpectrum`), and
   an empty spectrum without a `WarningKind::EmptySpectrum` warning
-  (`ConformanceError::EmptySpectrum`); see 1.11.
+  (`ConformanceError::EmptySpectrum`); see 1.11;
+- `assert_source_invariants` rejects a `RunMetadata::unstated` entry that
+  Core does not honour, because it would have no effect
+  (`ConformanceError::UnhonouredDeclaration`); see 1.6.
 
 If you use `openmassspec-arrow`, everything moves into a module named for
 the arrow-rs release it is built against (feature `arrow-60`, on by
@@ -642,8 +648,8 @@ conformance harness checks both:
   `0.0` is rejected by the harness
   (`ConformanceError::DeclaredOnEmptySpectrum`). `effective_base_peak` and
   `effective_mz_range` return `None` for an empty spectrum even when those
-  fields are set, so the writer never prints them. `total_ion_current` may
-  be declared as `0.0`.
+  fields are set, so the mzML writer and the Arrow builder never write
+  them. `total_ion_current` may be declared as `0.0`.
 
 The writer does not require the flag; the harness does, so a reader that
 forgets it fails in its own CI.
@@ -854,8 +860,9 @@ document them.
 | no `unstated` in run metadata                           | `unstated`, a list of check names (`"unknown_scan_mode"`, `"unknown_collision_energy_unit"`); left out when empty |
 
 `collision_energies`, `scan_windows` and `warnings` are left out of the dict
-when empty, so read them with `.get(key, [])`. An empty spectrum has a
-warning with kind `"empty_spectrum"` and no base peak or m/z range. An MS1 spectrum has
+when empty, so read them with `.get(key, [])`. A reader flags a spectrum
+with no peaks with a warning of kind `"empty_spectrum"`, and such a
+spectrum has no base peak or m/z range. An MS1 spectrum has
 `precursor` set to `None`.
 
 Before:

@@ -28,6 +28,9 @@
 //!    flagged.
 //! 7. The first spectrum's `index` is 0 and indices are strictly
 //!    increasing.
+//! 8. ([`assert_source_invariants`] only) every check in
+//!    [`RunMetadata::unstated`](crate::RunMetadata::unstated) is one Core
+//!    honours ([`ConformanceError::UnhonouredDeclaration`]).
 //!
 //! On failure each check emits a [`ConformanceError`] with the offending
 //! `native_id` so the operator can jump straight to the problem.
@@ -126,6 +129,12 @@ pub enum ConformanceError {
     /// Two spectra share a native id.
     #[non_exhaustive]
     DuplicateNativeId { native_id: String },
+    /// [`RunMetadata::unstated`](crate::RunMetadata::unstated) names a check
+    /// that Core does not honour there, so the declaration has no effect.
+    /// Only `unknown_scan_mode` and `unknown_collision_energy_unit` can be
+    /// declared.
+    #[non_exhaustive]
+    UnhonouredDeclaration { check: crate::Check },
 }
 
 impl std::fmt::Display for ConformanceError {
@@ -201,6 +210,11 @@ impl std::fmt::Display for ConformanceError {
             Self::DuplicateNativeId { native_id } => {
                 write!(f, "{native_id}: native id used by more than one spectrum")
             }
+            Self::UnhonouredDeclaration { check } => write!(
+                f,
+                "run metadata declares `{check}` as unstated, which has no effect; \
+                 only `unknown_scan_mode` and `unknown_collision_energy_unit` can be declared"
+            ),
         }
     }
 }
@@ -244,7 +258,17 @@ pub fn assert_source_invariants<S: SpectrumSource + ?Sized>(
 ) -> Result<usize, ConformanceError> {
     // The run's declared time axis decides whether retention time is
     // expected on every spectrum or on none.
-    let expects_rt = matches!(src.run_metadata().time_axis, crate::TimeAxis::Retention);
+    let meta = src.run_metadata();
+    if let Some(check) = meta
+        .unstated
+        .iter()
+        .find(|c| !crate::leniency::is_declared(&meta, c))
+    {
+        return Err(ConformanceError::UnhonouredDeclaration {
+            check: check.clone(),
+        });
+    }
+    let expects_rt = matches!(meta.time_axis, crate::TimeAxis::Retention);
     check_stream(
         src.iter_spectra().enumerate().map(|(position, item)| {
             item.map_err(|error| ConformanceError::Source { position, error })
@@ -611,6 +635,41 @@ mod tests {
         s.warnings
             .push(crate::Warning::new(WarningKind::EmptySpectrum, "no peaks"));
         s
+    }
+
+    #[test]
+    fn a_declaration_core_does_not_honour_fails_the_source_harness() {
+        struct Declares(Vec<crate::Check>);
+        impl SpectrumSource for Declares {
+            fn run_metadata(&self) -> RunMetadata {
+                ToySource(Vec::new(), None)
+                    .run_metadata()
+                    .with_unstated_checks(self.0.clone())
+            }
+            fn iter_spectra<'a>(&'a mut self) -> crate::SpectrumIter<'a> {
+                Box::new(vec![Ok(ok_spec(0, 1, 1.0))].into_iter())
+            }
+        }
+        let honoured = vec![
+            crate::Check::UnknownScanMode,
+            crate::Check::UnknownCollisionEnergyUnit,
+        ];
+        assert_eq!(
+            assert_source_invariants(&mut Declares(honoured)).unwrap(),
+            1
+        );
+        for bad in [
+            crate::Check::DanglingPrecursorRef,
+            crate::Check::SpectrumCountShortfall,
+            crate::Check::other("x.y"),
+        ] {
+            let err = assert_source_invariants(&mut Declares(vec![bad.clone()])).unwrap_err();
+            assert!(
+                matches!(&err, ConformanceError::UnhonouredDeclaration { check } if *check == bad),
+                "{err:?}"
+            );
+            assert!(err.to_string().contains(bad.as_str()));
+        }
     }
 
     #[test]

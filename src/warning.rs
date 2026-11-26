@@ -32,9 +32,9 @@ pub enum WarningKind {
     UnknownCollisionEnergyUnit,
     /// The source announced more spectra than were written or skipped.
     SpectrumCountShortfall,
-    /// The spectrum has no peaks. Every reader sets it on an empty
-    /// spectrum, so a consumer finds them by one code; the conformance
-    /// harness requires it.
+    /// The spectrum has no peaks. A reader sets it on an empty spectrum, so
+    /// a consumer finds them by one code whichever reader produced them; the
+    /// conformance harness requires it.
     EmptySpectrum,
     /// Run-level: the source declared that its format never states a value
     /// ([`RunMetadata::unstated`](crate::RunMetadata::unstated)), and at
