@@ -33,7 +33,8 @@ const NEIGHBOR_SPACING_FACTOR: f64 = 3.0;
 /// A spectrum with no declared scan mode is a record error
 /// ([`RecordProblem::UnknownScanMode`]) unless
 /// [`with_leniency`](Centroided::with_leniency) allows
-/// [`Check::UnknownScanMode`], which passes it through untouched with a
+/// [`Check::UnknownScanMode`] or the source declares the check in
+/// [`RunMetadata::unstated`], which passes it through untouched with a
 /// [`WarningKind::CentroidNotApplied`] warning. A spectrum declared
 /// profile whose points are too sparse to be profile data is a record error
 /// ([`RecordProblem::NotProfile`]). Peak weighting only joins neighbours
@@ -76,7 +77,9 @@ impl<S: SpectrumSource> SpectrumSource for Centroided<S> {
     /// Errors from the wrapped source pass through unchanged.
     fn iter_spectra<'a>(&'a mut self) -> SpectrumIter<'a> {
         let min_intensity = self.min_intensity;
-        let leniency = self.leniency.clone();
+        // What the caller allows, plus what the source says its format never
+        // states.
+        let leniency = self.leniency.with_declared(&self.inner.run_metadata());
         Box::new(
             self.inner
                 .iter_spectra()
@@ -160,6 +163,19 @@ fn centroid_record(
     rec.base_peak_intensity = None;
     rec.low_mz = None;
     rec.high_mz = None;
+    // The noise floor can remove every peak; an empty spectrum carries the
+    // flag wherever it comes from.
+    if rec.mz.is_empty()
+        && !rec
+            .warnings
+            .iter()
+            .any(|w| w.kind == WarningKind::EmptySpectrum)
+    {
+        rec.warnings.push(Warning::new(
+            WarningKind::EmptySpectrum,
+            "no peaks remain after centroiding",
+        ));
+    }
     Ok(rec)
 }
 
@@ -274,6 +290,7 @@ mod tests {
                     mobility_array_kind: None,
                     time_axis: crate::TimeAxis::Retention,
                     analyzers: Vec::new(),
+                    unstated: Vec::new(),
                     warnings: Vec::new(),
                     extra: Default::default(),
                 },
@@ -486,6 +503,45 @@ mod tests {
         assert_eq!(out.scan_mode, None);
         assert_eq!(out.warnings.len(), 1);
         assert_eq!(out.warnings[0].kind, WarningKind::CentroidNotApplied);
+    }
+
+    #[test]
+    fn centroiding_that_removes_every_peak_flags_the_empty_spectrum() {
+        let mut src = Centroided::new(OneSpectrumSource::new(profile_spectrum()))
+            .with_min_intensity(f32::MAX);
+        let out = src.iter_spectra().next().unwrap().unwrap();
+        assert!(out.mz.is_empty());
+        let flags = out
+            .warnings
+            .iter()
+            .filter(|w| w.kind == WarningKind::EmptySpectrum)
+            .count();
+        assert_eq!(flags, 1);
+        // The harness accepts it.
+        assert!(crate::conformance::assert_iter_invariants(vec![out]).is_ok());
+    }
+
+    #[test]
+    fn a_source_that_never_states_its_scan_mode_passes_through_marked() {
+        let mut rec = profile_spectrum();
+        rec.scan_mode = None;
+        let mut inner = OneSpectrumSource::new(rec);
+        inner.meta = inner.meta.with_unstated(Check::UnknownScanMode);
+        let mut src = Centroided::new(inner);
+        let out = src.iter_spectra().next().unwrap().unwrap();
+        assert_eq!(out.scan_mode, None);
+        assert_eq!(out.warnings[0].kind, WarningKind::CentroidNotApplied);
+
+        // A declaration of another check does not waive this one.
+        let mut rec = profile_spectrum();
+        rec.scan_mode = None;
+        let mut inner = OneSpectrumSource::new(rec);
+        inner.meta = inner.meta.with_unstated(Check::UnknownCollisionEnergyUnit);
+        let mut src = Centroided::new(inner);
+        assert_eq!(
+            problem(src.iter_spectra().next().unwrap()),
+            RecordProblem::UnknownScanMode
+        );
     }
 
     #[test]

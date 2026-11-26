@@ -157,6 +157,8 @@ must satisfy:
 - equal-length m/z and intensity arrays,
 - equal-length mobility arrays (when present),
 - declared TIC and base-peak intensity match the arrays,
+- an empty spectrum carries `WarningKind::EmptySpectrum` and declares no
+  base peak and no m/z range,
 - precursor presence on MSn spectra.
 
 Failures surface as `ConformanceError` variants

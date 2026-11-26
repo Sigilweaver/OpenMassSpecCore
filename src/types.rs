@@ -20,6 +20,7 @@ use crate::cv;
 use crate::enums::{
     Activation, Analyzer, CollisionEnergyUnit, MobilityArrayKind, Polarity, ScanMode,
 };
+use crate::leniency::Check;
 use crate::warning::Warning;
 
 /// Generates builder setters: `KIND SETTER FIELD: TYPE`.
@@ -114,7 +115,11 @@ pub struct PrecursorInfo {
     /// Precursor intensity (when known).
     pub intensity: Option<f64>,
     /// Collision energies, each with its own unit. One entry normally;
-    /// stepped or combined activation has several. A `None` unit means the
+    /// stepped or combined activation has several. An entry is one applied
+    /// energy: a ramp (start, end or midpoint) is not an entry, and neither
+    /// is one cell's value when the scan uses two cells. A reader that
+    /// cannot state the applied energy leaves the list empty and keeps the
+    /// raw values in `extra`. A `None` unit means the
     /// reader does not know it; the mzML writer then rejects the record
     /// rather than guess eV (unless `Check::UnknownCollisionEnergyUnit` is
     /// allowed).
@@ -280,6 +285,11 @@ pub struct SpectrumRecord {
     /// Lowest observed m/z. If `None`, the writer uses `mz.first()`.
     pub low_mz: Option<f64>,
     /// Highest observed m/z. If `None`, the writer uses `mz.last()`.
+    ///
+    /// On a spectrum with no peaks leave all four of `base_peak_mz`,
+    /// `base_peak_intensity`, `low_mz` and `high_mz` `None`: the mzML
+    /// writer and the Arrow builder ignore them there, and the conformance
+    /// harness rejects them.
     pub high_mz: Option<f64>,
     /// Instrument scan windows in m/z: the acquisition ranges, which are not
     /// the observed range of the peaks. Segmented and multi-window
@@ -393,13 +403,15 @@ impl SpectrumRecord {
     }
 
     /// Base-peak `(mz, intensity)`, computed from the arrays when not
-    /// pre-populated. Returns `None` when the spectrum has no peaks.
+    /// pre-populated. Returns `None` when the spectrum has no peaks, even if
+    /// `base_peak_mz` and `base_peak_intensity` are set: an empty spectrum
+    /// has no base peak.
     pub fn effective_base_peak(&self) -> Option<(f64, f64)> {
+        if self.mz.is_empty() || self.intensity.is_empty() {
+            return None;
+        }
         if let (Some(mz), Some(i)) = (self.base_peak_mz, self.base_peak_intensity) {
             return Some((mz, i));
-        }
-        if self.intensity.is_empty() {
-            return None;
         }
         // `total_cmp` orders NaN above every number, so a NaN is a visible
         // maximum rather than being skipped; the writer rejects non-finite
@@ -415,8 +427,13 @@ impl SpectrumRecord {
     }
 
     /// `(low_mz, high_mz)`, falling back to the first/last entries in `mz`
-    /// when not pre-populated. Returns `None` for empty spectra.
+    /// when not pre-populated. Returns `None` for an empty spectrum, even if
+    /// `low_mz` and `high_mz` are set: an empty spectrum has no observed
+    /// range.
     pub fn effective_mz_range(&self) -> Option<(f64, f64)> {
+        if self.mz.is_empty() {
+            return None;
+        }
         match (self.low_mz, self.high_mz) {
             (Some(lo), Some(hi)) => Some((lo, hi)),
             _ => match (self.mz.first(), self.mz.last()) {
@@ -571,6 +588,22 @@ pub struct RunMetadata {
     /// a Fusion) preserve per-scan analyzer identity. When empty, every
     /// spectrum references the single default `IC1`.
     pub analyzers: Vec<Analyzer>,
+    /// Checks for something the source format never states: a claim by the
+    /// reader that every file of this format leaves the value out, so a
+    /// missing value is the format's, not a decode failure. Only
+    /// [`Check::UnknownScanMode`] (the format has no profile/centroid
+    /// flag) and [`Check::UnknownCollisionEnergyUnit`] (the format gives
+    /// collision energies with no unit) are honoured; other entries are
+    /// ignored. For a declared check the mzML writer and
+    /// [`Centroided`](crate::Centroided) behave as if the caller had
+    /// allowed it, each affected record still carries its own
+    /// [`Warning`], and the run gets one
+    /// [`WarningKind::UnstatedBySource`](crate::WarningKind::UnstatedBySource) warning per declared check that
+    /// a record needed. A check that is not declared stays strict. A reader
+    /// that can read the value from the file, or that has a gap only in
+    /// some files, declares nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unstated: Vec<Check>,
     /// Warnings attached by the reader or by a lenient mode; see
     /// [`Warning`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -605,6 +638,7 @@ impl RunMetadata {
             mobility_array_kind: None,
             time_axis: TimeAxis::Retention,
             analyzers: Vec::new(),
+            unstated: Vec::new(),
             warnings: Vec::new(),
             extra: BTreeMap::new(),
         }
@@ -613,6 +647,17 @@ impl RunMetadata {
     /// Insert one `extra` entry. Keys use `<reader>.<field>`.
     pub fn with_extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra.insert(key.into(), value.into());
+        self
+    }
+
+    /// Declare that the format never states what `check` guards (see
+    /// [`unstated`](Self::unstated)). Declaring the same check twice keeps
+    /// one entry.
+    #[must_use]
+    pub fn with_unstated(mut self, check: Check) -> Self {
+        if !self.unstated.contains(&check) {
+            self.unstated.push(check);
+        }
         self
     }
 }
@@ -659,6 +704,11 @@ macro_rules! push_warning {
 push_warning!(SpectrumRecord, ChromatogramRecord, RunMetadata);
 
 /// One collision energy and its unit.
+///
+/// An entry is one applied energy, with no cell role and no ramp. A ramp
+/// is not an entry: do not put its start, end or midpoint in
+/// [`PrecursorInfo::collision_energies`], because that states a value the
+/// instrument did not apply. Core has no field for ramps or cell roles yet.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct CollisionEnergy {
@@ -734,6 +784,7 @@ setters!(RunMetadata {
     opt with_mobility_array_kind mobility_array_kind: MobilityArrayKind,
     val with_time_axis time_axis: TimeAxis,
     val with_analyzers analyzers: Vec<Analyzer>,
+    val with_unstated_checks unstated: Vec<Check>,
     val with_warnings warnings: Vec<Warning>,
     val with_extra_map extra: BTreeMap<String, String>,
 });
@@ -822,6 +873,53 @@ mod tests {
         metadata_json.as_object_mut().unwrap().remove("extra");
         let metadata: RunMetadata = serde_json::from_value(metadata_json).unwrap();
         assert!(metadata.extra.is_empty());
+    }
+
+    #[test]
+    fn an_empty_spectrum_has_no_base_peak_or_range_whatever_was_declared() {
+        let empty = SpectrumRecord::new(0, 1, "scan=1")
+            .with_base_peak_mz(0.0)
+            .with_base_peak_intensity(0.0)
+            .with_low_mz(0.0)
+            .with_high_mz(0.0);
+        assert_eq!(empty.effective_base_peak(), None);
+        assert_eq!(empty.effective_mz_range(), None);
+        // A spectrum with peaks keeps the declared values.
+        let full = empty
+            .clone()
+            .with_peaks(vec![100.0, 200.0], vec![1.0, 2.0])
+            .with_base_peak_mz(150.0)
+            .with_base_peak_intensity(9.0)
+            .with_low_mz(50.0)
+            .with_high_mz(500.0);
+        assert_eq!(full.effective_base_peak(), Some((150.0, 9.0)));
+        assert_eq!(full.effective_mz_range(), Some((50.0, 500.0)));
+    }
+
+    #[test]
+    fn unstated_declarations_round_trip_and_default_to_none() {
+        let m = run_metadata()
+            .with_unstated(Check::UnknownScanMode)
+            .with_unstated(Check::UnknownScanMode)
+            .with_unstated(Check::UnknownCollisionEnergyUnit);
+        assert_eq!(
+            m.unstated,
+            vec![Check::UnknownScanMode, Check::UnknownCollisionEnergyUnit]
+        );
+        let json = serde_json::to_value(&m).unwrap();
+        assert_eq!(
+            json["unstated"],
+            serde_json::json!(["unknown_scan_mode", "unknown_collision_energy_unit"])
+        );
+        let back: RunMetadata = serde_json::from_value(json).unwrap();
+        assert_eq!(back, m);
+        // Absent when empty, and a record from before the field parses.
+        let json = serde_json::to_value(run_metadata()).unwrap();
+        assert!(json.get("unstated").is_none());
+        let none: RunMetadata = serde_json::from_value(json).unwrap();
+        assert!(none.unstated.is_empty());
+        let all = run_metadata().with_unstated_checks(vec![Check::UnknownScanMode]);
+        assert_eq!(all.unstated, vec![Check::UnknownScanMode]);
     }
 
     #[test]

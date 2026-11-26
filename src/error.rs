@@ -32,7 +32,8 @@ pub enum Error {
     /// reported no error for the difference. Allow it with
     /// `Check::SpectrumCountShortfall`.
     #[error(
-        "the source announced {announced} spectra but only {accounted} were written or skipped"
+        "the source announced {announced} spectra but only {accounted} were written or skipped; \
+         allow the check `spectrum_count_shortfall` to write what was read"
     )]
     #[non_exhaustive]
     SpectrumCountShortfall {
@@ -107,14 +108,20 @@ pub enum RecordProblem {
         upper: f64,
     },
     /// A precursor `spectrumRef` names a spectrum that is not in the output.
-    #[error("precursor references spectrum {reference:?}, which is not in the output")]
+    #[error(
+        "precursor references spectrum {reference:?}, which is not in the output; \
+         allow the check `dangling_precursor_ref` to drop the reference"
+    )]
     #[non_exhaustive]
     DanglingPrecursorRef {
         /// The referenced native id.
         reference: String,
     },
     /// The reader did not say whether the spectrum is profile or centroid.
-    #[error("scan mode is unknown (neither profile nor centroid was declared)")]
+    #[error(
+        "scan mode is unknown (neither profile nor centroid was declared); \
+         allow the check `unknown_scan_mode` to continue without it"
+    )]
     UnknownScanMode,
     /// A spectrum labelled profile is a sparse peak list, not profile data.
     #[error(
@@ -129,7 +136,10 @@ pub enum RecordProblem {
         relative_ppm: f64,
     },
     /// A collision energy is present but its unit is not known.
-    #[error("collision energy is set but its unit (eV or NCE) is not known")]
+    #[error(
+        "collision energy is set but its unit (eV or NCE) is not known; \
+         allow the check `unknown_collision_energy_unit` to write it without a unit"
+    )]
     CollisionEnergyUnitUnknown,
     /// Charge, intensity or CCS is set but the selected-ion m/z is not.
     #[error("precursor has {field} but no selected-ion m/z")]
