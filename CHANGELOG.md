@@ -4,7 +4,9 @@ All notable changes to `openmassspec-core` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 crate adheres to [Semantic Versioning](https://semver.org/).
 
-## [4.0.0] - Unreleased
+## [Unreleased]
+
+## [4.0.0] - 2026-11-27
 
 Reader authors, users of records and Python users: see
 [MIGRATING-4.0.md](https://github.com/Sigilweaver/OpenMassSpecCore/blob/main/MIGRATING-4.0.md)
